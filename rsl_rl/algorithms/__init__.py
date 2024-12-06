@@ -8,3 +8,13 @@ from .sac import SAC
 from .td3 import TD3
 
 __all__ = ["Agent", "DDPG", "D4PG", "DPPO", "DSAC", "PPO", "SAC", "TD3"]
+
+ALG_FACTORY = {
+    "DDPG": DDPG,
+    "D4PG": D4PG,
+    "DPPO": DPPO,
+    "DSAC": DSAC,
+    "PPO": PPO,
+    "SAC": SAC,
+    "TD3": TD3,
+}
