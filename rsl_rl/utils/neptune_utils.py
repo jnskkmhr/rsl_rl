@@ -1,7 +1,6 @@
 import os
-
+from dataclasses import asdict
 from torch.utils.tensorboard import SummaryWriter
-from legged_gym.utils import class_to_dict
 
 try:
     import neptune.new as neptune
@@ -13,11 +12,9 @@ class NeptuneLogger:
     def __init__(self, project, token):
         self.run = neptune.init(project=project, api_token=token)
 
-    def store_config(self, env_cfg, runner_cfg, alg_cfg, policy_cfg):
+    def store_config(self, env_cfg, runner_cfg):
         self.run["runner_cfg"] = runner_cfg
-        self.run["policy_cfg"] = policy_cfg
-        self.run["alg_cfg"] = alg_cfg
-        self.run["env_cfg"] = class_to_dict(env_cfg)
+        self.run["env_cfg"] = asdict(env_cfg)
 
 
 class NeptuneSummaryWriter(SummaryWriter):
@@ -75,8 +72,8 @@ class NeptuneSummaryWriter(SummaryWriter):
     def stop(self):
         self.neptune_logger.run.stop()
 
-    def log_config(self, env_cfg, runner_cfg, alg_cfg, policy_cfg):
-        self.neptune_logger.store_config(env_cfg, runner_cfg, alg_cfg, policy_cfg)
+    def log_config(self, env_cfg, runner_cfg):
+        self.neptune_logger.store_config(env_cfg, runner_cfg)
 
     def save_model(self, model_path, iter):
         self.neptune_logger.run["model/saved_model_" + str(iter)].upload(model_path)

@@ -14,45 +14,12 @@ from rsl_rl.algorithms import ALG_FACTORY
 from rsl_rl.env import VecEnv
 
 
-class EpisodeStatistics(TypedDict):
-    """The statistics of an episode."""
-
-    # Time it took to collect samples for the current interation.
-    collection_time: Union[int, None]
-    # The counter of the current interation.
-    current_iteration: int
-    # The number of the final iteration of the current run.
-    final_iteration: int
-    # The number of the first iteration of the current run.
-    first_iteration: int
-    # Environment information about the current interation.
-    info: list
-    # The lengths of the episodes.
-    lengths: Union[List[int], None]
-    # The loss of the current interation.
-    loss: Union[dict, None]
-    # The returns of the episodes.
-    returns: Union[List[float], None]
-    # The total time it took to run the current interation.
-    total_time: Union[int, None]
-    # The time it took to update the agent.
-    update_time: Union[int, None]
-
-
-Callback = Callable[[EpisodeStatistics], None]
-
-
-class Runner:
+class PolicyRunner:
     """The runner class for running an agent in an environment.
 
-    This class is responsible for running an agent in an environment. It is responsible for collecting data from the
-    environment, updating the agent, and evaluating the agent. It also provides a number of callbacks that can be used
-    to log and visualize the training progress.
+    This class is responsible for running an agent in an environment. 
+    It is responsible for collecting data from the environment, updating the agent, and evaluating the agent.
     """
-
-    # _dataset: Dataset
-    # _episode_statistics: EpisodeStatistics
-    _num_steps_per_env: int
 
     def __init__(
         self,
@@ -63,14 +30,9 @@ class Runner:
     ) -> None:
         """
         Args:
-            environment (rsl_rl.env.VecEnv): The environment to run the agent in.
-            agent (rsl_rl.algorithms.agent): The RL agent to run.
+            env (rsl_rl.env.VecEnv): The environment to run the agent in.
+            train_cfg (dict): The configuration of the training process.
             device (str): The device to run on.
-            evaluation_cb (List[Callable[[dict], None]], optional): A list of callbacks that are called after each round
-                of evaluation.
-            learn_cb (List[Callable[[dict], None]], optional): A list of callbacks that are called after each round of
-                learning.
-            observation_history_length: The number of observations to concatenate into a single observation.
         """
         self.cfg = train_cfg
         self.agent_cfg = train_cfg["agent"]
@@ -78,14 +40,36 @@ class Runner:
         self.agent = ALG_FACTORY[train_cfg["class_name"]](env, **self.agent_cfg)
         self.device = device
         
+        self._num_steps_per_env = self.cfg["num_steps_per_env"]
+        self._current_learning_iteration = 0
+        
+        self.to(self.device) # transfer everything to gpu
+        
+        # log
         self.log_dir = log_dir
         self._save_interval = self.cfg["save_interval"]
-        self._num_steps_per_env = self.cfg["num_steps_per_env"]
-
-        self._current_learning_iteration = 0
         self._git_status_repos = [rsl_rl.__file__]
+        self.writer = 0
 
-        self.to(self.device)
+        self.initialize_logger()
+    
+    def initialize_logger(self):
+        self.logger_type = self.cfg.get("logger", "tensorboard")
+        if self.logger_type == "neptune":
+            from rsl_rl.utils.neptune_utils import NeptuneSummaryWriter
+
+            self.writer = NeptuneSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=self.cfg)
+            self.writer.log_config(self.env.cfg, self.cfg)
+        elif self.logger_type == "wandb":
+            from rsl_rl.utils.wandb_utils import WandbSummaryWriter
+
+            self.writer = WandbSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=self.cfg)
+            self.writer.log_config(self.env.cfg, self.cfg)
+        elif self.logger_type == "tensorboard":
+            from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
+            self.writer = TensorboardSummaryWriter(log_dir=self.log_dir, flush_secs=10)
+        else:
+            raise AssertionError("logger type not found")
     
     def learn(
         self, iterations: Union[int, None] = None, timeout: Union[int, None] = None, return_epochs: int = 100
@@ -157,13 +141,13 @@ class Runner:
 
             if self.agent.initialized:
                 self._episode_statistics["current_iteration"] += 1
-
-            self._episode_statistics["info"].clear()
+                
             self._current_learning_iteration = self._episode_statistics["current_iteration"]
             
             # log
             if self.log_dir is not None:
                 self._log(self._episode_statistics)
+            self._episode_statistics["info"].clear()
             
             # save model 
             if self._current_learning_iteration % self._save_interval == 0:
@@ -201,8 +185,6 @@ class Runner:
         self._obs, self._env_info = next_obs, next_env_info
 
         # Gather statistics
-        if "episode" in self._env_info:
-            self._episode_statistics["info"].append(self._env_info["episode"])
         dones_idx = (dones + next_env_info["time_outs"]).nonzero().cpu()
         self._current_episode_lengths += 1
         self._current_cumulative_rewards += rewards.cpu()
@@ -217,6 +199,11 @@ class Runner:
         self._episode_statistics["current_actions"] = actions
         self._episode_statistics["current_observations"] = self._obs
         self._episode_statistics["sample_count"] = self.agent.storage.sample_count
+        
+        if "episode" in self._env_info.keys():
+            self._episode_statistics["info"].append(self._env_info["episode"])
+        if "log" in self._env_info.keys():
+            self._episode_statistics["info"].append(self._env_info["log"])
     
     def _update(self) -> None:
         """Updates the agent using the collected data."""
@@ -293,7 +280,7 @@ class Runner:
     def add_git_repo_to_log(self, repo_file_path):
         self._git_status_repos.append(repo_file_path)
     
-    def to(self, device) -> Runner:
+    def to(self, device) -> PolicyRunner:
         """Sets the device of the runner and its components."""
         self.device = device
 
@@ -305,6 +292,75 @@ class Runner:
             pass
 
         return self
+
+    def _log(self, stat, prefix="", width: int = 80, pad: int = 35):
+        """Logs the progress and statistics of the runner."""
+        ep_string = ""
+        
+        current_iteration = stat["current_iteration"]
+        final_iteration = stat["final_iteration"]
+
+        collection_time = stat["collection_time"]
+        update_time = stat["update_time"]
+        total_time = stat["total_time"]
+        collection_percentage = 100 * collection_time / total_time
+        update_percentage = 100 * update_time / total_time
+
+        # if prefix == "":
+        #     prefix = "learn" if stat["storage_initialized"] else "init"
+        # self._log_progress(stat, clear_line=False, prefix=prefix)
+
+        mean_reward = sum(stat["returns"]) / len(stat["returns"]) if len(stat["returns"]) > 0 else 0.0
+        mean_steps = sum(stat["lengths"]) / len(stat["lengths"]) if len(stat["lengths"]) > 0 else 0.0
+        # total_steps = current_iteration * self.env.num_envs * self._num_steps_per_env
+        # sample_count = stat["sample_count"]
+
+        # for key, value in self.agent._bm_report().items():
+        #     mean, count = value
+        #     print(f"BM {key}:\t{mean/1000000.0:.4f}ms ({count} calls, total {mean*count/1000000.0:.4f}ms)")
+        
+        # push log data to logger
+        ep_string += "=" * width + "\n"
+        for key in stat["info"][0].keys():
+            infotensor = torch.tensor([], device=self.device)
+            for ep_info in stat["info"]:
+                if key not in ep_info:
+                    continue
+                if not isinstance(ep_info[key], torch.Tensor):
+                    ep_info[key] = torch.tensor([ep_info[key]], device=self.device)
+                if len(ep_info[key].shape) == 0:
+                    ep_info[key] = ep_info[key].unsqueeze(0)
+                infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
+            value = torch.mean(infotensor)
+            
+            if "/" in key:
+                self.writer.add_scalar(key, value, current_iteration)
+                ep_string += f"{key}:\t{value:.4f}\n"
+            else:
+                self.writer.add_scalar("Episode/" + key, value, current_iteration)
+                ep_string += f"Mean episode {key}:\t{value:.4f}\n"
+        ep_string += "=" * width + "\n"
+        
+        # push performance index to logger
+        self.writer.add_scalar("Performance/total_time", total_time, current_iteration)
+        self.writer.add_scalar("Performance/collection_time", collection_time, current_iteration)
+        self.writer.add_scalar("Performance/update_time", update_time, current_iteration)
+        self.writer.add_scalar("Performance/update_percentage", update_percentage, current_iteration)
+        ep_string += f"learning iteration:\t{current_iteration}/{final_iteration}\n"
+        ep_string += f"iteration time:\t{total_time:.4f}s (collection: {collection_time:.2f}s [{collection_percentage:.1f}%], update: {update_time:.2f}s [{update_percentage:.1f}%])\n"
+        
+        self.writer.add_scalar("Train/mean_reward", mean_reward, current_iteration)
+        self.writer.add_scalar("Train/mean_episode_length", mean_steps, current_iteration)
+        ep_string += f"Mean reward:\t{mean_reward:.4f}\n"
+        ep_string += f"Mean episode length:\t{mean_steps:.4f}\n"
+        # ep_string += f"stored samples:\t{sample_count}\n"
+        # ep_string += f"total steps:\t{total_steps}\n"
+
+        for key, value in stat["loss"].items():
+            self.writer.add_scalar(f"Loss/{key}", value, current_iteration)
+            ep_string += f"{key} loss:\t{value:.4f}\n"
+        
+        print(ep_string)
     
     def _log_progress(self, stat, clear_line=True, prefix=""):
         """Logs the progress of the runner."""
@@ -353,39 +409,7 @@ class Runner:
             f"{prefix}{progress} {step_string} [{completion_percentage:.1f}%, {1/average_total_time:.2f}it/s, {remaining_time_string} ETA]",
             end="\r" if clear_line else "\n",
         )
-
-    def _log(self, stat, prefix=""):
-        """Logs the progress and statistics of the runner."""
-        current_iteration = stat["current_iteration"]
-
-        collection_time = stat["collection_time"]
-        update_time = stat["update_time"]
-        total_time = stat["total_time"]
-        collection_percentage = 100 * collection_time / total_time
-        update_percentage = 100 * update_time / total_time
-
-        if prefix == "":
-            prefix = "learn" if stat["storage_initialized"] else "init"
-        self._log_progress(stat, clear_line=False, prefix=prefix)
-        print(
-            f"iteration time:\t{total_time:.4f}s (collection: {collection_time:.2f}s [{collection_percentage:.1f}%], update: {update_time:.2f}s [{update_percentage:.1f}%])"
-        )
-
-        mean_reward = sum(stat["returns"]) / len(stat["returns"]) if len(stat["returns"]) > 0 else 0.0
-        mean_steps = sum(stat["lengths"]) / len(stat["lengths"]) if len(stat["lengths"]) > 0 else 0.0
-        total_steps = current_iteration * self.env.num_envs * self._num_steps_per_env
-        sample_count = stat["sample_count"]
-        print(f"avg. reward:\t{mean_reward:.4f}")
-        print(f"avg. steps:\t{mean_steps:.4f}")
-        print(f"stored samples:\t{sample_count}")
-        print(f"total steps:\t{total_steps}")
-
-        for key, value in stat["loss"].items():
-            print(f"{key} loss:\t{value:.4f}")
-
-        for key, value in self.agent._bm_report().items():
-            mean, count = value
-            print(f"BM {key}:\t{mean/1000000.0:.4f}ms ({count} calls, total {mean*count/1000000.0:.4f}ms)")
+        
 
     # def evaluate(self, steps: int, return_epochs: int = 100) -> float:
     #     """Evaluates the agent for a number of steps.

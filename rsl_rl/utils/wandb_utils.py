@@ -1,7 +1,7 @@
 import os
 
 from torch.utils.tensorboard import SummaryWriter
-from legged_gym.utils import class_to_dict
+from dataclasses import asdict
 
 try:
     import wandb
@@ -39,12 +39,6 @@ class WandbSummaryWriter(SummaryWriter):
 
         wandb.log({"log_dir": run_name})
 
-    def store_config(self, env_cfg, runner_cfg, alg_cfg, policy_cfg):
-        wandb.config.update({"runner_cfg": runner_cfg})
-        wandb.config.update({"policy_cfg": policy_cfg})
-        wandb.config.update({"alg_cfg": alg_cfg})
-        wandb.config.update({"env_cfg": class_to_dict(env_cfg)})
-
     def _map_path(self, path):
         if path in self.name_map:
             return self.name_map[path]
@@ -64,8 +58,9 @@ class WandbSummaryWriter(SummaryWriter):
     def stop(self):
         wandb.finish()
 
-    def log_config(self, env_cfg, runner_cfg, alg_cfg, policy_cfg):
-        self.store_config(env_cfg, runner_cfg, alg_cfg, policy_cfg)
+    def log_config(self, env_cfg, runner_cfg):
+        wandb.config.update({"runner_cfg": runner_cfg})
+        wandb.config.update({"env_cfg": asdict(env_cfg)})
 
     def save_model(self, model_path, iter):
         wandb.save(model_path)
