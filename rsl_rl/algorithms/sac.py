@@ -180,41 +180,48 @@ class SAC(AbstractActorCritic):
 
         if not self.initialized:
             return {}
+        
+        total_actor_loss = 0 
+        total_alpha_loss = 0
+        total_critic_1_loss = 0
+        total_critic_2_loss = 0
+        
+        for epoch in range(self._learning_epochs):
+            for idx, batch in enumerate(self.storage.batch_generator(self._batch_size, self._batch_count)):
+                actor_obs = batch["actor_observations"]
+                critic_obs = batch["critic_observations"]
+                actions = batch["actions"].reshape(-1, self._action_size)
+                rewards = batch["rewards"]
+                actor_next_obs = batch["next_actor_observations"]
+                critic_next_obs = batch["next_critic_observations"]
+                dones = batch["dones"]
 
-        total_actor_loss = torch.zeros(self._batch_count)
-        total_alpha_loss = torch.zeros(self._batch_count)
-        total_critic_1_loss = torch.zeros(self._batch_count)
-        total_critic_2_loss = torch.zeros(self._batch_count)
+                critic_1_loss, critic_2_loss = self._update_critic(
+                    critic_obs, actions, rewards, dones, actor_next_obs, critic_next_obs
+                )
+                actor_loss, alpha_loss = self._update_actor_and_alpha(actor_obs, critic_obs)
 
-        for idx, batch in enumerate(self.storage.batch_generator(self._batch_size, self._batch_count)):
-            actor_obs = batch["actor_observations"]
-            critic_obs = batch["critic_observations"]
-            actions = batch["actions"].reshape(-1, self._action_size)
-            rewards = batch["rewards"]
-            actor_next_obs = batch["next_actor_observations"]
-            critic_next_obs = batch["next_critic_observations"]
-            dones = batch["dones"]
+                # Update Target Networks
 
-            critic_1_loss, critic_2_loss = self._update_critic(
-                critic_obs, actions, rewards, dones, actor_next_obs, critic_next_obs
-            )
-            actor_loss, alpha_loss = self._update_actor_and_alpha(actor_obs, critic_obs)
-
-            # Update Target Networks
-
-            self._update_target(self.critic_1, self.target_critic_1)
-            self._update_target(self.critic_2, self.target_critic_2)
-
-            total_actor_loss[idx] = actor_loss.item()
-            total_alpha_loss[idx] = alpha_loss.item()
-            total_critic_1_loss[idx] = critic_1_loss.item()
-            total_critic_2_loss[idx] = critic_2_loss.item()
+                self._update_target(self.critic_1, self.target_critic_1)
+                self._update_target(self.critic_2, self.target_critic_2)
+                
+                total_actor_loss += actor_loss.item()
+                total_alpha_loss += alpha_loss.item()
+                total_critic_1_loss += critic_1_loss.item()
+                total_critic_2_loss += critic_2_loss.item()
+        
+        num_updates = self._learning_epochs * self._batch_count
+        total_actor_loss /= num_updates
+        total_alpha_loss /= num_updates
+        total_critic_1_loss /= num_updates
+        total_critic_2_loss /= num_updates
 
         stats = {
-            "actor": total_actor_loss.mean().item(),
-            "alpha": total_alpha_loss.mean().item(),
-            "critic1": total_critic_1_loss.mean().item(),
-            "critic2": total_critic_2_loss.mean().item(),
+            "actor": total_actor_loss,
+            "alpha": total_alpha_loss,
+            "critic1": total_critic_1_loss,
+            "critic2": total_critic_2_loss,
         }
 
         return stats

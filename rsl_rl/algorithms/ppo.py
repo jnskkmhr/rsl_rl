@@ -211,51 +211,60 @@ class PPO(AbstractActorCritic):
         total_loss = torch.zeros(self._batch_count)
         total_surrogate_loss = torch.zeros(self._batch_count)
         total_value_loss = torch.zeros(self._batch_count)
+        
+        total_loss = 0 
+        total_surrogate_loss = 0
+        total_value_loss = 0
+        
+        for epoch in range(self._learning_epochs):
+            for idx, batch in enumerate(self.storage.batch_generator(self._batch_count, trajectories=self.recurrent)):
+                if self.recurrent:
+                    transition_obs = batch["actor_observations"].reshape(*batch["actor_observations"].shape[:2], -1)
+                    observations, data = transitions_to_trajectories(transition_obs, batch["dones"])
+                    hidden_state_h, _ = transitions_to_trajectories(batch["actor_state_h"], batch["dones"])
+                    hidden_state_c, _ = transitions_to_trajectories(batch["actor_state_c"], batch["dones"])
+                    # Init. sequence with each trajectory's first hidden state. Subsequent hidden states are produced by the
+                    # network, depending on the previous hidden state and the current observation.
+                    hidden_state = (hidden_state_h[0].transpose(0, 1), hidden_state_c[0].transpose(0, 1))
 
-        for idx, batch in enumerate(self.storage.batch_generator(self._batch_count, trajectories=self.recurrent)):
-            if self.recurrent:
-                transition_obs = batch["actor_observations"].reshape(*batch["actor_observations"].shape[:2], -1)
-                observations, data = transitions_to_trajectories(transition_obs, batch["dones"])
-                hidden_state_h, _ = transitions_to_trajectories(batch["actor_state_h"], batch["dones"])
-                hidden_state_c, _ = transitions_to_trajectories(batch["actor_state_c"], batch["dones"])
-                # Init. sequence with each trajectory's first hidden state. Subsequent hidden states are produced by the
-                # network, depending on the previous hidden state and the current observation.
-                hidden_state = (hidden_state_h[0].transpose(0, 1), hidden_state_c[0].transpose(0, 1))
+                    action_mean, action_std = self.actor.forward(observations, hidden_state=hidden_state, compute_std=True)
 
-                action_mean, action_std = self.actor.forward(observations, hidden_state=hidden_state, compute_std=True)
+                    action_mean = action_mean.reshape(*observations.shape[:-1], self._action_size)
+                    action_std = action_std.reshape(*observations.shape[:-1], self._action_size)
 
-                action_mean = action_mean.reshape(*observations.shape[:-1], self._action_size)
-                action_std = action_std.reshape(*observations.shape[:-1], self._action_size)
+                    action_mean = trajectories_to_transitions(action_mean, data)
+                    action_std = trajectories_to_transitions(action_std, data)
+                else:
+                    action_mean, action_std = self.actor.forward(batch["actor_observations"], compute_std=True)
 
-                action_mean = trajectories_to_transitions(action_mean, data)
-                action_std = trajectories_to_transitions(action_std, data)
-            else:
-                action_mean, action_std = self.actor.forward(batch["actor_observations"], compute_std=True)
+                actions_dist = torch.distributions.Normal(action_mean, action_std)
 
-            actions_dist = torch.distributions.Normal(action_mean, action_std)
+                if self._schedule == self.schedule_adaptive:
+                    self._update_learning_rate(batch, actions_dist)
 
-            if self._schedule == self.schedule_adaptive:
-                self._update_learning_rate(batch, actions_dist)
+                surrogate_loss = self._compute_actor_loss(batch, actions_dist)
+                value_loss = self._compute_value_loss(batch)
+                actions_entropy = actions_dist.entropy().sum(-1)
 
-            surrogate_loss = self._compute_actor_loss(batch, actions_dist)
-            value_loss = self._compute_value_loss(batch)
-            actions_entropy = actions_dist.entropy().sum(-1)
+                loss = surrogate_loss + self._value_coeff * value_loss - self._entropy_coeff * actions_entropy.mean()
 
-            loss = surrogate_loss + self._value_coeff * value_loss - self._entropy_coeff * actions_entropy.mean()
-
-            self.optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.parameters(), self._gradient_clip)
-            self.optimizer.step()
-
-            total_loss[idx] = loss.detach()
-            total_surrogate_loss[idx] = surrogate_loss.detach()
-            total_value_loss[idx] = value_loss.detach()
-
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.parameters(), self._gradient_clip)
+                self.optimizer.step()
+                
+                total_loss += loss.item()
+                total_surrogate_loss += surrogate_loss.item()
+                total_value_loss += value_loss.item()
+        
+        num_updates = self._learning_epochs * self._batch_count
+        total_loss /= num_updates
+        total_surrogate_loss /= num_updates
+        total_value_loss /= num_updates
         stats = {
-            "total": total_loss.mean().item(),
-            "surrogate": total_surrogate_loss.mean().item(),
-            "value": total_value_loss.mean().item(),
+            "total": total_loss,
+            "surrogate": total_surrogate_loss,
+            "value": total_value_loss,
         }
 
         return stats

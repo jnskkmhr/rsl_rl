@@ -27,6 +27,7 @@ class AbstractActorCritic(Agent):
         actor_shared_dims: int = None,
         batch_count: int = 1,
         batch_size: int = 1,
+        learning_epochs: int = 1,
         critic_activations: List[str] = ["relu", "relu", "relu", "linear"],
         critic_hidden_dims: List[int] = [256, 256, 256],
         critic_init_gain: float = 0.5,
@@ -56,6 +57,7 @@ class AbstractActorCritic(Agent):
             actor_shared_dims (int): The number of dimensions to share for an actor with multiple heads.
             batch_count (int): The number of batches to process per update step.
             batch_size (int): The size of each batch to process during the update step.
+            learning_epochs (int): The number of epochs to train the actor and critic networks.
             critic_activations (List[str]): A list of activation functions for the critic network.
             critic_hidden_dims: (List[str]): A list of layer sizes for the critic network.
             critic_init_gain (float): Network initialization gain for critic.
@@ -85,6 +87,7 @@ class AbstractActorCritic(Agent):
 
         self._batch_size = batch_size
         self._batch_count = batch_count
+        self._learning_epochs = learning_epochs
         self._polyak_factor = polyak
         self._return_steps = return_steps
         self._recurrent = recurrent
