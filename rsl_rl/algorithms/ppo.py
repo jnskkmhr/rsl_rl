@@ -27,6 +27,8 @@ class PPO:
         learning_rate=1e-3,
         max_grad_norm=1.0,
         use_clipped_value_loss=True,
+        use_lipschitz_reg=False,
+        lipschitz_reg_coef=100.0,
         schedule="fixed",
         desired_kl=0.01,
         device="cpu",
@@ -54,6 +56,9 @@ class PPO:
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+        
+        self.use_lipschitz_reg = use_lipschitz_reg
+        self.lipschitz_reg_coef = lipschitz_reg_coef
 
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
         self.storage = RolloutStorage(
@@ -101,6 +106,7 @@ class PPO:
     def update(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
+        mean_lipschitz_reg_loss = 0
         if self.actor_critic.is_recurrent:
             generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
@@ -165,8 +171,18 @@ class PPO:
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
+            
+            # Lipschitz regularization
+            # https://arxiv.org/abs/2405.12424
+            if self.use_lipschitz_reg:
+                linear_network = [self.actor_critic.actor[i] for i in range(len(self.actor_critic.actor)-1) if i % 2 == 0] + [self.actor_critic.actor[-1]]
+                weights_inf_norm = [torch.norm(layer.weight, float("inf")) for layer in linear_network]
+                lipschitz_constant = torch.prod(torch.stack(weights_inf_norm))
+                lipschitz_reg_loss = self.lipschitz_reg_coef * lipschitz_constant
+            else:
+                lipschitz_reg_loss = torch.tensor(0.0, device=self.device)
 
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + lipschitz_reg_loss
 
             # Gradient step
             self.optimizer.zero_grad()
@@ -176,10 +192,12 @@ class PPO:
 
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
+            mean_lipschitz_reg_loss += lipschitz_reg_loss.item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
+        mean_lipschitz_reg_loss /= num_updates
         self.storage.clear()
 
-        return mean_value_loss, mean_surrogate_loss
+        return mean_value_loss, mean_surrogate_loss, mean_lipschitz_reg_loss
