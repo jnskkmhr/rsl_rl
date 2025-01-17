@@ -87,7 +87,7 @@ class AbstractActorCritic(Agent):
 
         self._batch_size = batch_size
         self._batch_count = batch_count
-        self._learning_epochs = learning_epochs
+        self._num_learning_epochs = learning_epochs
         self._polyak_factor = polyak
         self._return_steps = return_steps
         self._recurrent = recurrent

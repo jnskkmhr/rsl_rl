@@ -186,32 +186,31 @@ class SAC(AbstractActorCritic):
         total_critic_1_loss = 0
         total_critic_2_loss = 0
         
-        for epoch in range(self._learning_epochs):
-            for idx, batch in enumerate(self.storage.batch_generator(self._batch_size, self._batch_count)):
-                actor_obs = batch["actor_observations"]
-                critic_obs = batch["critic_observations"]
-                actions = batch["actions"].reshape(-1, self._action_size)
-                rewards = batch["rewards"]
-                actor_next_obs = batch["next_actor_observations"]
-                critic_next_obs = batch["next_critic_observations"]
-                dones = batch["dones"]
+        for idx, batch in enumerate(self.storage.batch_generator(self._num_learning_epochs, self._batch_size, self._batch_count)):
+            actor_obs = batch["actor_observations"]
+            critic_obs = batch["critic_observations"]
+            actions = batch["actions"].reshape(-1, self._action_size)
+            rewards = batch["rewards"]
+            actor_next_obs = batch["next_actor_observations"]
+            critic_next_obs = batch["next_critic_observations"]
+            dones = batch["dones"]
 
-                critic_1_loss, critic_2_loss = self._update_critic(
-                    critic_obs, actions, rewards, dones, actor_next_obs, critic_next_obs
-                )
-                actor_loss, alpha_loss = self._update_actor_and_alpha(actor_obs, critic_obs)
+            critic_1_loss, critic_2_loss = self._update_critic(
+                critic_obs, actions, rewards, dones, actor_next_obs, critic_next_obs
+            )
+            actor_loss, alpha_loss = self._update_actor_and_alpha(actor_obs, critic_obs)
 
-                # Update Target Networks
+            # Update Target Networks
 
-                self._update_target(self.critic_1, self.target_critic_1)
-                self._update_target(self.critic_2, self.target_critic_2)
-                
-                total_actor_loss += actor_loss.item()
-                total_alpha_loss += alpha_loss.item()
-                total_critic_1_loss += critic_1_loss.item()
-                total_critic_2_loss += critic_2_loss.item()
+            self._update_target(self.critic_1, self.target_critic_1)
+            self._update_target(self.critic_2, self.target_critic_2)
+            
+            total_actor_loss += actor_loss.item()
+            total_alpha_loss += alpha_loss.item()
+            total_critic_1_loss += critic_1_loss.item()
+            total_critic_2_loss += critic_2_loss.item()
         
-        num_updates = self._learning_epochs * self._batch_count
+        num_updates = self._num_learning_epochs * self._batch_count
         total_actor_loss /= num_updates
         total_alpha_loss /= num_updates
         total_critic_1_loss /= num_updates

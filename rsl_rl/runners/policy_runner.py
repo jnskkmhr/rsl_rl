@@ -185,7 +185,8 @@ class PolicyRunner:
         self._obs, self._env_info = next_obs, next_env_info
 
         # Gather statistics
-        dones_idx = (dones + next_env_info["time_outs"]).nonzero().cpu()
+        # dones_idx = (dones + next_env_info["time_outs"]).nonzero().cpu()
+        dones_idx = dones.nonzero().cpu() # in IsaacLab, time_outs already included in dones
         self._current_episode_lengths += 1
         self._current_cumulative_rewards += rewards.cpu()
 
@@ -305,22 +306,21 @@ class PolicyRunner:
         total_time = stat["total_time"]
         collection_percentage = 100 * collection_time / total_time
         update_percentage = 100 * update_time / total_time
-
-        # if prefix == "":
-        #     prefix = "learn" if stat["storage_initialized"] else "init"
-        # self._log_progress(stat, clear_line=False, prefix=prefix)
-
+        
         mean_reward = sum(stat["returns"]) / len(stat["returns"]) if len(stat["returns"]) > 0 else 0.0
         mean_steps = sum(stat["lengths"]) / len(stat["lengths"]) if len(stat["lengths"]) > 0 else 0.0
-        # total_steps = current_iteration * self.env.num_envs * self._num_steps_per_env
-        # sample_count = stat["sample_count"]
-
-        # for key, value in self.agent._bm_report().items():
-        #     mean, count = value
-        #     print(f"BM {key}:\t{mean/1000000.0:.4f}ms ({count} calls, total {mean*count/1000000.0:.4f}ms)")
+        
+        ep_string += "=" * width + "\n"
+        ep_string += f"learning iteration:\t{current_iteration}/{final_iteration}\n"
+        ep_string += f"iteration time:\t{total_time:.4f}s (collection: {collection_time:.2f}s [{collection_percentage:.1f}%], update: {update_time:.2f}s [{update_percentage:.1f}%])\n"
+        if len(stat["returns"]) > 0:
+            self.writer.add_scalar("Train/mean_reward", mean_reward, current_iteration)
+            self.writer.add_scalar("Train/mean_episode_length", mean_steps, current_iteration)
+            ep_string += f"Mean reward:\t{mean_reward:.4f}\n"
+            ep_string += f"Mean episode length:\t{mean_steps:.4f}\n"
+        ep_string += "=" * width + "\n"
         
         # push log data to logger
-        ep_string += "=" * width + "\n"
         for key in stat["info"][0].keys():
             infotensor = torch.tensor([], device=self.device)
             for ep_info in stat["info"]:
@@ -339,22 +339,13 @@ class PolicyRunner:
             else:
                 self.writer.add_scalar("Episode/" + key, value, current_iteration)
                 ep_string += f"Mean episode {key}:\t{value:.4f}\n"
-        ep_string += "=" * width + "\n"
+        # ep_string += "=" * width + "\n"
         
         # push performance index to logger
         self.writer.add_scalar("Performance/total_time", total_time, current_iteration)
         self.writer.add_scalar("Performance/collection_time", collection_time, current_iteration)
         self.writer.add_scalar("Performance/update_time", update_time, current_iteration)
         self.writer.add_scalar("Performance/update_percentage", update_percentage, current_iteration)
-        ep_string += f"learning iteration:\t{current_iteration}/{final_iteration}\n"
-        ep_string += f"iteration time:\t{total_time:.4f}s (collection: {collection_time:.2f}s [{collection_percentage:.1f}%], update: {update_time:.2f}s [{update_percentage:.1f}%])\n"
-        
-        self.writer.add_scalar("Train/mean_reward", mean_reward, current_iteration)
-        self.writer.add_scalar("Train/mean_episode_length", mean_steps, current_iteration)
-        ep_string += f"Mean reward:\t{mean_reward:.4f}\n"
-        ep_string += f"Mean episode length:\t{mean_steps:.4f}\n"
-        # ep_string += f"stored samples:\t{sample_count}\n"
-        # ep_string += f"total steps:\t{total_steps}\n"
 
         for key, value in stat["loss"].items():
             self.writer.add_scalar(f"Loss/{key}", value, current_iteration)

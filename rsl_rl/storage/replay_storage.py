@@ -93,7 +93,7 @@ class ReplayStorage(Storage):
                 self._full = True
                 self._idx = 0
 
-    def batch_generator(self, batch_size: int, batch_count: int) -> Generator[Transition, None, None]:
+    def batch_generator(self, num_learning_epochs:int, batch_size: int, batch_count: int) -> Generator[Transition, None, None]:
         """Returns a generator that yields batches of transitions.
 
         Args:
@@ -108,15 +108,16 @@ class ReplayStorage(Storage):
             return
 
         max_idx = self._env_count * (self._size if self._full else self._idx)
+        
+        for epoch in range(num_learning_epochs):
+            for _ in range(batch_count):
+                batch_idx = torch.randint(high=max_idx, size=(batch_size,))
 
-        for _ in range(batch_count):
-            batch_idx = torch.randint(high=max_idx, size=(batch_size,))
+                batch = {}
+                for key, value in self._data.items():
+                    batch[key] = self._process_undo(key, value[batch_idx].clone())
 
-            batch = {}
-            for key, value in self._data.items():
-                batch[key] = self._process_undo(key, value[batch_idx].clone())
-
-            yield batch
+                yield batch
 
     def register_processor(self, key: str, process: Callable, undo: Optional[Callable] = None) -> None:
         """Registers a processor for a transition item.

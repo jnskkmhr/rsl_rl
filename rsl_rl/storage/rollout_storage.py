@@ -35,7 +35,7 @@ class RolloutStorage(ReplayStorage):
 
         super().append(dataset)
 
-    def batch_generator(self, batch_count: int, trajectories: bool = False) -> Generator[Transition, None, None]:
+    def batch_generator(self, num_learning_epochs:int, batch_count: int, trajectories: bool = False) -> Generator[Transition, None, None]:
         """Yields batches of transitions or trajectories.
 
         Args:
@@ -60,12 +60,13 @@ class RolloutStorage(ReplayStorage):
             data = {k: v.reshape(-1, self._env_count, *v.shape[1:]).transpose(0, 1) for k, v in self._data.items()}
         else:
             data = self._data
+        
+        for epoch in range(num_learning_epochs):
+            for i in range(batch_count):
+                batch_idx = indices[i * batch_size : (i + 1) * batch_size].detach().to(self.device)
 
-        for i in range(batch_count):
-            batch_idx = indices[i * batch_size : (i + 1) * batch_size].detach().to(self.device)
+                batch = {}
+                for key, value in data.items():
+                    batch[key] = self._process_undo(key, value[batch_idx].clone())
 
-            batch = {}
-            for key, value in data.items():
-                batch[key] = self._process_undo(key, value[batch_idx].clone())
-
-            yield batch
+                yield batch
