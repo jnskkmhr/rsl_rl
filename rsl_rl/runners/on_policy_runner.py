@@ -63,6 +63,9 @@ class OnPolicyRunner:
         self.tot_time = 0
         self.current_learning_iteration = 0
         self.git_status_repos = [rsl_rl.__file__]
+        
+        # make directory for model 
+        os.makedirs(os.path.join(self.log_dir, "model"), exist_ok=True)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
         # initialize writer
@@ -157,7 +160,7 @@ class OnPolicyRunner:
             if self.log_dir is not None:
                 self.log(locals())
             if it % self.save_interval == 0:
-                self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
+                self.save(os.path.join(self.log_dir, "model", f"model_{it}.pt"))
             ep_infos.clear()
             if it == start_iter:
                 # obtain all the diff files
