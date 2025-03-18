@@ -12,7 +12,7 @@ import torch
 from collections import deque
 
 import rsl_rl
-from rsl_rl.algorithms import PPO
+from rsl_rl.algorithms import PPO, PPO_LCP
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, EmpiricalNormalization
 from rsl_rl.utils import store_code_state
@@ -51,7 +51,7 @@ class OnPolicyRunner:
             # add rnd gated state to config
             self.alg_cfg["rnd_cfg"]["num_states"] = num_rnd_state
             # scale down the rnd weight with timestep (similar to how rewards are scaled down in legged_gym envs)
-            self.alg_cfg["rnd_cfg"]["weight"] *= env.unwrapped.step_dt
+            self.alg_cfg["rnd_cfg"]["weight"] *= env.unwrapped.step_dt # type: ignore
 
         # if using symmetry then pass the environment config object
         if self.alg_cfg.get("symmetry_cfg") is not None:
@@ -60,7 +60,7 @@ class OnPolicyRunner:
 
         # init algorithm
         alg_class = eval(self.alg_cfg.pop("class_name"))  # PPO
-        self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
+        self.alg: PPO|PPO_LCP = alg_class(actor_critic, device=self.device, **self.alg_cfg)
 
         # store training configuration
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
@@ -88,6 +88,9 @@ class OnPolicyRunner:
         self.tot_time = 0
         self.current_learning_iteration = 0
         self.git_status_repos = [rsl_rl.__file__]
+        
+        # make directory to save model 
+        os.makedirs(f"{self.log_dir}/model", exist_ok=True)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):  # noqa: C901
         # initialize writer
@@ -107,7 +110,7 @@ class OnPolicyRunner:
                 self.writer = WandbSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=self.cfg)
                 self.writer.log_config(self.env.cfg, self.cfg, self.alg_cfg, self.policy_cfg)
             elif self.logger_type == "tensorboard":
-                from torch.utils.tensorboard import SummaryWriter
+                from torch.utils.tensorboard.writer import SummaryWriter
 
                 self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
             else:
@@ -148,7 +151,7 @@ class OnPolicyRunner:
                     # Sample actions from policy
                     actions = self.alg.act(obs, critic_obs)
                     # Step environment
-                    obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
+                    obs, rewards, dones, infos = self.env.step(actions.to(self.env.device)) # type: ignore
 
                     # Move to the agent device
                     obs, rewards, dones = obs.to(self.device), rewards.to(self.device), dones.to(self.device)
@@ -205,7 +208,11 @@ class OnPolicyRunner:
 
             # Update policy
             # Note: we keep arguments here since locals() loads them
-            mean_value_loss, mean_surrogate_loss, mean_entropy, mean_rnd_loss, mean_symmetry_loss = self.alg.update()
+            if self.alg.__class__.__name__ == "PPO":
+                mean_value_loss, mean_surrogate_loss, mean_entropy, mean_rnd_loss, mean_symmetry_loss = self.alg.update()
+                mean_gradient_penalty_loss = 0
+            elif self.alg.__class__.__name__ == "PPO_LCP":
+                mean_value_loss, mean_surrogate_loss, mean_entropy, mean_rnd_loss, mean_symmetry_loss, mean_gradient_penalty_loss = self.alg.update()
             stop = time.time()
             learn_time = stop - start
             self.current_learning_iteration = it
@@ -228,11 +235,11 @@ class OnPolicyRunner:
                 # if possible store them to wandb
                 if self.logger_type in ["wandb", "neptune"] and git_file_paths:
                     for path in git_file_paths:
-                        self.writer.save_file(path)
+                        self.writer.save_file(path) # type: ignore
 
         # Save the final model after training
         if self.log_dir is not None:
-            self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
+            self.save(os.path.join(self.log_dir, "model", f"model_{self.current_learning_iteration}.pt"))
 
     def log(self, locs: dict, width: int = 80, pad: int = 35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
@@ -268,6 +275,7 @@ class OnPolicyRunner:
         self.writer.add_scalar("Loss/value_function", locs["mean_value_loss"], locs["it"])
         self.writer.add_scalar("Loss/surrogate", locs["mean_surrogate_loss"], locs["it"])
         self.writer.add_scalar("Loss/entropy", locs["mean_entropy"], locs["it"])
+        self.writer.add_scalar("Loss/gradient_penalty", locs["mean_gradient_penalty_loss"], locs["it"])
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
         if self.alg.rnd:
             self.writer.add_scalar("Loss/rnd", locs["mean_rnd_loss"], locs["it"])
@@ -376,7 +384,7 @@ class OnPolicyRunner:
 
         # Upload model to external logging service
         if self.logger_type in ["neptune", "wandb"]:
-            self.writer.save_model(path, self.current_learning_iteration)
+            self.writer.save_model(path, self.current_learning_iteration) # type: ignore
 
     def load(self, path: str, load_optimizer: bool = True):
         loaded_dict = torch.load(path, weights_only=False)
