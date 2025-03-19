@@ -223,7 +223,7 @@ class OnPolicyRunner:
                 self.log(locals())
                 # Save model
                 if it % self.save_interval == 0:
-                    self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
+                    self.save(os.path.join(self.log_dir, "model", f"model_{it}.pt"))
 
             # Clear episode infos
             ep_infos.clear()
