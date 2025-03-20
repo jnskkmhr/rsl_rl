@@ -43,6 +43,7 @@ class PPO:
         rnd_cfg: dict | None = None,
         # Symmetry parameters
         symmetry_cfg: dict | None = None,
+        regularize_action: bool = False,
     ):
         self.device = device
 
@@ -61,6 +62,9 @@ class PPO:
         else:
             self.rnd = None
             self.rnd_optimizer = None
+        
+        # Regularize action
+        self.regularize_action = regularize_action
 
         # Symmetry components
         if symmetry_cfg is not None:
@@ -117,6 +121,7 @@ class PPO:
             critic_obs_shape,
             action_shape,
             rnd_state_shape,
+            self.regularize_action,
             self.device,
         )
 
@@ -163,6 +168,11 @@ class PPO:
             self.transition.rewards += self.gamma * torch.squeeze(
                 self.transition.values * infos["time_outs"].unsqueeze(1).to(self.device), 1
             )
+        
+        # Add action regularization coefficient
+        if self.regularize_action:
+            # TODO: check if action_reg should be part of observation.
+            self.transition.action_reg = infos["action_reg_coef"]
 
         # Record the transition
         self.storage.add_transitions(self.transition)
@@ -190,6 +200,11 @@ class PPO:
             mean_symmetry_loss = 0
         else:
             mean_symmetry_loss = None
+        
+        if self.regularize_action:
+            mean_action_reg_loss = 0
+        else:
+            mean_action_reg_loss = None
 
         # generator for mini batches
         if self.actor_critic.is_recurrent:
@@ -211,6 +226,7 @@ class PPO:
             hid_states_batch,
             masks_batch,
             rnd_state_batch,
+            action_reg_batch,
         ) in generator:
 
             # number of augmentations per sample
@@ -344,6 +360,13 @@ class PPO:
                 # compute the loss as the mean squared error
                 mseloss = torch.nn.MSELoss()
                 rnd_loss = mseloss(predicted_embedding, target_embedding.detach())
+            
+            # Action regularization loss
+            if self.regularize_action:
+                # mu_batch: [minibatch_size, action_dim]
+                # action_reg_batch: [minibatch_size, 1]
+                action_reg_loss = torch.mean(torch.sum(action_reg_batch * torch.abs(mu_batch), dim=1))
+                loss += action_reg_loss
 
             # Gradient step
             # -- For PPO
@@ -367,6 +390,9 @@ class PPO:
             # -- Symmetry loss
             if mean_symmetry_loss is not None:
                 mean_symmetry_loss += symmetry_loss.item()
+            # -- Action regularization loss
+            if mean_action_reg_loss is not None:
+                mean_action_reg_loss += action_reg_loss.item()
 
         # -- For PPO
         num_updates = self.num_learning_epochs * self.num_mini_batches
@@ -379,7 +405,10 @@ class PPO:
         # -- For Symmetry
         if mean_symmetry_loss is not None:
             mean_symmetry_loss /= num_updates
+        # -- For Action regularization
+        if mean_action_reg_loss is not None:
+            mean_action_reg_loss /= num_updates
         # -- Clear the storage
         self.storage.clear()
 
-        return mean_value_loss, mean_surrogate_loss, mean_entropy, mean_rnd_loss, mean_symmetry_loss
+        return mean_value_loss, mean_surrogate_loss, mean_entropy, mean_rnd_loss, mean_symmetry_loss, mean_action_reg_loss

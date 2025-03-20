@@ -40,6 +40,7 @@ class PPO_LCP(PPO):
         rnd_cfg: dict | None = None,
         # Symmetry parameters
         symmetry_cfg: dict | None = None,
+        regularize_action: bool = False,
     ):
         super().__init__(
             actor_critic=actor_critic,
@@ -57,6 +58,9 @@ class PPO_LCP(PPO):
             desired_kl=desired_kl,
             device=device,
             normalize_advantage_per_mini_batch=normalize_advantage_per_mini_batch,
+            rnd_cfg=rnd_cfg,
+            symmetry_cfg=symmetry_cfg,
+            regularize_action=regularize_action,
         )
         
         self.gradient_penalty_coef = gradient_penalty_coef
@@ -82,6 +86,11 @@ class PPO_LCP(PPO):
             mean_symmetry_loss = 0
         else:
             mean_symmetry_loss = None
+        
+        if self.regularize_action:
+            mean_action_reg_loss = 0
+        else:
+            mean_action_reg_loss = None
 
         # generator for mini batches
         if self.actor_critic.is_recurrent:
@@ -103,6 +112,7 @@ class PPO_LCP(PPO):
             hid_states_batch,
             masks_batch,
             rnd_state_batch,
+            action_reg_batch
         ) in generator:
 
             # number of augmentations per sample
@@ -249,6 +259,11 @@ class PPO_LCP(PPO):
                 # compute the loss as the mean squared error
                 mseloss = torch.nn.MSELoss()
                 rnd_loss = mseloss(predicted_embedding, target_embedding.detach())
+            
+            # Action regularization loss
+            if self.regularize_action:
+                mean_action_reg_loss = torch.mean(action_reg_batch * torch.abs(mu_batch))
+                loss += mean_action_reg_loss
 
             # Gradient step
             # -- For PPO
@@ -289,4 +304,4 @@ class PPO_LCP(PPO):
         # -- Clear the storage
         self.storage.clear()
 
-        return mean_value_loss, mean_surrogate_loss, mean_entropy, mean_rnd_loss, mean_symmetry_loss, mean_gradient_penalty_loss
+        return mean_value_loss, mean_surrogate_loss, mean_entropy, mean_rnd_loss, mean_symmetry_loss, mean_action_reg_loss, mean_gradient_penalty_loss
