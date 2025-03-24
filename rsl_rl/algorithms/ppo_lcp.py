@@ -262,7 +262,7 @@ class PPO_LCP(PPO):
             
             # Action regularization loss
             if self.regularize_action:
-                mean_action_reg_loss = torch.mean(action_reg_batch * torch.abs(mu_batch))
+                action_reg_loss = torch.mean(torch.sum(action_reg_batch * torch.abs(mu_batch), dim=1))
                 loss += mean_action_reg_loss
 
             # Gradient step
@@ -286,8 +286,9 @@ class PPO_LCP(PPO):
             if mean_rnd_loss is not None:
                 mean_rnd_loss += rnd_loss.item()
             # -- Symmetry loss
-            if mean_symmetry_loss is not None:
-                mean_symmetry_loss += symmetry_loss.item()
+            # -- Action regularization loss
+            if mean_action_reg_loss is not None:
+                mean_action_reg_loss += action_reg_loss.item()
 
         # -- For PPO
         num_updates = self.num_learning_epochs * self.num_mini_batches
@@ -301,6 +302,9 @@ class PPO_LCP(PPO):
         # -- For Symmetry
         if mean_symmetry_loss is not None:
             mean_symmetry_loss /= num_updates
+        # -- For Action regularization
+        if mean_action_reg_loss is not None:
+            mean_action_reg_loss /= num_updates
         # -- Clear the storage
         self.storage.clear()
 
