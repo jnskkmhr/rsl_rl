@@ -116,6 +116,8 @@ class ActorCritic(nn.Module):
             std = torch.exp(self.log_std).expand_as(mean)
         else:
             raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+        # print("std", std)
+        std = std.clamp(min=1e-6, max=1.0)  # clamp std to avoid numerical issues
         # create distribution
         self.distribution = Normal(mean, std)
 
