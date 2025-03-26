@@ -121,13 +121,20 @@ class ActorCritic(nn.Module):
 
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
-        return self.distribution.sample()
+        action = self.distribution.sample()
+        action = torch.tanh(action)
+        return action
+        # return self.distribution.sample()
 
     def get_actions_log_prob(self, actions):
-        return self.distribution.log_prob(actions).sum(dim=-1)
+        log_action = self.distribution.log_prob(actions).sum(dim=-1)
+        log_action = log_action - torch.sum(torch.log(1 - torch.tanh(actions).pow(2) + 1e-6), dim=-1)
+        return log_action
+        # return self.distribution.log_prob(actions).sum(dim=-1)
 
     def act_inference(self, observations):
         actions_mean = self.actor(observations)
+        actions_mean = torch.tanh(actions_mean)
         return actions_mean
 
     def evaluate(self, critic_observations, **kwargs):
