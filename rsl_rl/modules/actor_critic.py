@@ -80,13 +80,13 @@ class ActorCritic(nn.Module):
         # disable args validation for speedup
         Normal.set_default_validate_args(False)
     
-    # Initialize weights to zero
+    # Initialize weights of last layer to zero same as https://arxiv.org/abs/1812.06298
     def init_weights_zero(self, sequential):
-        for layer in sequential:
-            if isinstance(layer, nn.Linear):
-                nn.init.zeros_(layer.weight)
-                if layer.bias is not None:
-                    nn.init.zeros_(layer.bias)
+        layer = sequential[-1]
+        if isinstance(layer, nn.Linear):
+            nn.init.zeros_(layer.weight)
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
 
     def reset(self, dones=None):
         pass

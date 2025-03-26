@@ -366,6 +366,7 @@ class PPO:
                 # mu_batch: [minibatch_size, action_dim]
                 # action_reg_batch: [minibatch_size, 1]
                 action_reg_loss = torch.mean(torch.sum(action_reg_batch * torch.abs(mu_batch), dim=1))
+                # action_reg_loss = torch.mean(torch.sum(action_reg_batch * torch.norm(mu_batch, dim=1, keepdim=True), dim=1))
                 loss += action_reg_loss
 
             # Gradient step

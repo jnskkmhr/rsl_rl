@@ -168,12 +168,14 @@ class PPO_LCP(PPO):
             entropy_batch = self.actor_critic.entropy[:original_batch_size]
             
             # -- Lipschitz constraint (gradient penalty)
-            if self.actor_critic.is_recurrent:
-                # double backward not supported in RNN API
-                print("Double backward not supported in RNN API")
-                gradient_penalty_loss = torch.tensor(0.0, device=self.device)
-            else:
-                gradient_penalty_loss = self._calc_grad_penalty(obs_est_batch, actions_log_prob_batch)
+            # if self.actor_critic.is_recurrent:
+            #     # double backward not supported in RNN API
+            #     print("Double backward not supported in RNN API")
+            #     gradient_penalty_loss = torch.tensor(0.0, device=self.device)
+            # else:
+            #     gradient_penalty_loss = self._calc_grad_penalty(obs_est_batch, actions_log_prob_batch)
+            gradient_penalty_loss = self._calc_grad_penalty(obs_est_batch, actions_log_prob_batch)
+            # print(gradient_penalty_loss)
 
             # KL
             if self.desired_kl is not None and self.schedule == "adaptive":
@@ -262,8 +264,11 @@ class PPO_LCP(PPO):
             
             # Action regularization loss
             if self.regularize_action:
+                # mu_batch: [minibatch_size, action_dim]
+                # action_reg_batch: [minibatch_size, 1]
                 action_reg_loss = torch.mean(torch.sum(action_reg_batch * torch.abs(mu_batch), dim=1))
-                loss += mean_action_reg_loss
+                # action_reg_loss = torch.mean(torch.sum(action_reg_batch * torch.norm(mu_batch, dim=1, keepdim=True), dim=1))
+                loss += action_reg_loss
 
             # Gradient step
             # -- For PPO
