@@ -79,6 +79,7 @@ class ActorCritic(nn.Module):
         self.distribution = None
         # disable args validation for speedup
         Normal.set_default_validate_args(False)
+        self.epsilon = 1e-6
     
     # Initialize weights of last layer to zero same as https://arxiv.org/abs/1812.06298
     def init_weights_zero(self, sequential):
@@ -116,22 +117,25 @@ class ActorCritic(nn.Module):
             std = torch.exp(self.log_std).expand_as(mean)
         else:
             raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
-        # print("std", std)
-        std = std.clamp(min=1e-6, max=1.0)  # clamp std to avoid numerical issues
+        print("std", std)
+        std = torch.nan_to_num(std, nan=0.01)
+        # print("std after clip", std)
         # create distribution
         self.distribution = Normal(mean, std)
-
+    
+    # gaussian action 
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
-        action = self.distribution.sample()
-        action = torch.tanh(action)
-        return action
+        gaussian_action = self.distribution.sample()
+        return gaussian_action
         # return self.distribution.sample()
 
     def get_actions_log_prob(self, actions):
-        log_action = self.distribution.log_prob(actions).sum(dim=-1)
-        log_action = log_action - torch.sum(torch.log(1 - torch.tanh(actions).pow(2) + 1e-6), dim=-1)
-        return log_action
+        log_prob = self.distribution.log_prob(actions).sum(dim=-1)
+        # change of variable formula from SAC paper: https://arxiv.org/abs/1801.01290
+        squashed_actions = torch.tanh(actions)
+        log_prob = log_prob - torch.sum(torch.log(1 - squashed_actions**2 + self.epsilon), dim=-1)
+        return log_prob
         # return self.distribution.log_prob(actions).sum(dim=-1)
 
     def act_inference(self, observations):
