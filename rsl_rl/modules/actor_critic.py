@@ -79,7 +79,7 @@ class ActorCritic(nn.Module):
         self.distribution = None
         # disable args validation for speedup
         Normal.set_default_validate_args(False)
-        self.epsilon = 1e-6
+        self.eps = 1e-6
     
     # Initialize weights of last layer to zero same as https://arxiv.org/abs/1812.06298
     def init_weights_zero(self, sequential):
@@ -117,9 +117,8 @@ class ActorCritic(nn.Module):
             std = torch.exp(self.log_std).expand_as(mean)
         else:
             raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
-        print("std", std)
+        # print("std", std)
         std = torch.nan_to_num(std, nan=0.01)
-        # print("std after clip", std)
         # create distribution
         self.distribution = Normal(mean, std)
     
@@ -127,21 +126,21 @@ class ActorCritic(nn.Module):
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
         gaussian_action = self.distribution.sample()
-        return gaussian_action
+        return torch.tanh(gaussian_action)
         # return self.distribution.sample()
-
-    def get_actions_log_prob(self, actions):
-        log_prob = self.distribution.log_prob(actions).sum(dim=-1)
-        # change of variable formula from SAC paper: https://arxiv.org/abs/1801.01290
-        squashed_actions = torch.tanh(actions)
-        log_prob = log_prob - torch.sum(torch.log(1 - squashed_actions**2 + self.epsilon), dim=-1)
-        return log_prob
-        # return self.distribution.log_prob(actions).sum(dim=-1)
 
     def act_inference(self, observations):
         actions_mean = self.actor(observations)
-        actions_mean = torch.tanh(actions_mean)
-        return actions_mean
+        return torch.tanh(actions_mean)
+    
+    def get_actions_log_prob(self, actions):
+        # inverse of tanh
+        gaussian_action = torch.atanh(torch.clamp(actions, -1+self.eps, 1-self.eps))
+        log_prob = self.distribution.log_prob(gaussian_action).sum(dim=-1)
+        # change of variable formula from SAC paper: https://arxiv.org/abs/1801.01290
+        log_prob = log_prob - torch.sum(torch.log(1 - actions**2 + self.eps), dim=-1)
+        return log_prob
+        # return self.distribution.log_prob(actions).sum(dim=-1)
 
     def evaluate(self, critic_observations, **kwargs):
         value = self.critic(critic_observations)
