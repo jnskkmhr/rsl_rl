@@ -5,12 +5,18 @@
 
 from __future__ import annotations
 
+import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions import Normal
 
 from rsl_rl.utils import resolve_nn_activation
 
+STD_MIN = math.exp(-20)
+STD_MAX = math.exp(0.1)
+LOG_STD_MAX = 0.1
+LOG_STD_MIN = -20
 
 class ActorCritic(nn.Module):
     is_recurrent = False
@@ -42,14 +48,21 @@ class ActorCritic(nn.Module):
         actor_layers = []
         actor_layers.append(nn.Linear(mlp_input_dim_a, actor_hidden_dims[0]))
         actor_layers.append(activation)
-        for layer_index in range(len(actor_hidden_dims)):
-            if layer_index == len(actor_hidden_dims) - 1:
-                actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], num_actions))
-            else:
-                actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], actor_hidden_dims[layer_index + 1]))
-                actor_layers.append(activation)
+        # for layer_index in range(len(actor_hidden_dims)):
+        #     if layer_index == len(actor_hidden_dims) - 1:
+        #         actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], num_actions))
+        #     else:
+        #         actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], actor_hidden_dims[layer_index + 1]))
+        #         actor_layers.append(activation)
+        for layer_index in range(len(actor_hidden_dims)-1):
+            actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], actor_hidden_dims[layer_index + 1]))
+            actor_layers.append(activation)
         self.actor = nn.Sequential(*actor_layers)
-        self.init_weights_zero(self.actor)
+        
+        self.mean_network = nn.Linear(actor_hidden_dims[-1], num_actions)
+        self.std_network = nn.Linear(actor_hidden_dims[-1], num_actions)
+        self.init_weights_zero(self.mean_network)
+        self.init_weights_zero(self.std_network)
 
         # Value function
         critic_layers = []
@@ -62,19 +75,18 @@ class ActorCritic(nn.Module):
                 critic_layers.append(nn.Linear(critic_hidden_dims[layer_index], critic_hidden_dims[layer_index + 1]))
                 critic_layers.append(activation)
         self.critic = nn.Sequential(*critic_layers)
-        self.init_weights_zero(self.critic)
 
         print(f"Actor MLP: {self.actor}")
         print(f"Critic MLP: {self.critic}")
 
         # Action noise
         self.noise_std_type = noise_std_type
-        if self.noise_std_type == "scalar":
-            self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
-        elif self.noise_std_type == "log":
-            self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
-        else:
-            raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+        # if self.noise_std_type == "scalar":
+        #     self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+        # elif self.noise_std_type == "log":
+        #     self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
+        # else:
+        #     raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
 
         # Action distribution (populated in update_distribution)
         self.distribution = None
@@ -86,12 +98,18 @@ class ActorCritic(nn.Module):
         self.squash_output = squash_output
     
     # Initialize weights of last layer to zero same as https://arxiv.org/abs/1812.06298
-    def init_weights_zero(self, sequential):
-        layer = sequential[-1]
-        if isinstance(layer, nn.Linear):
-            nn.init.zeros_(layer.weight)
-            if layer.bias is not None:
-                nn.init.zeros_(layer.bias)
+    # def init_sequential_weights_zero(self, sequential):
+    #     layer = sequential[-1]
+    #     if isinstance(layer, nn.Linear):
+    #         nn.init.zeros_(layer.weight)
+    #         if layer.bias is not None:
+    #             nn.init.zeros_(layer.bias)
+    
+    def init_weights_zero(self, network):
+        if isinstance(network, nn.Linear):
+            nn.init.zeros_(network.weight)
+            if network.bias is not None:
+                nn.init.zeros_(network.bias)
 
     def reset(self, dones=None):
         pass
@@ -113,16 +131,18 @@ class ActorCritic(nn.Module):
 
     def update_distribution(self, observations):
         # compute mean
-        mean = self.actor(observations)
+        net_output = self.actor(observations)
+        mean = self.mean_network(net_output)
         # compute standard deviation
         if self.noise_std_type == "scalar":
-            std = self.std.expand_as(mean)
+            std = self.std_network(net_output)
+            std = torch.clamp(std, STD_MIN, STD_MAX)
         elif self.noise_std_type == "log":
-            std = torch.exp(self.log_std).expand_as(mean)
+            log_std = self.std_network(net_output)
+            log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
+            std = torch.exp(log_std)
         else:
             raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
-        # print("std", std)
-        std = torch.nan_to_num(std, nan=0.01)
         # create distribution
         self.distribution = Normal(mean, std)
     
@@ -136,7 +156,8 @@ class ActorCritic(nn.Module):
             return self.distribution.sample()
 
     def act_inference(self, observations):
-        actions_mean = self.actor(observations)
+        net_output = self.actor(observations)
+        actions_mean = self.mean_network(net_output)
         if self.squash_output:
             return torch.tanh(actions_mean)
         else:
@@ -144,12 +165,20 @@ class ActorCritic(nn.Module):
     
     def get_actions_log_prob(self, actions):
         if self.squash_output:
-            # inverse of tanh
-            # gaussian_action = torch.atanh(torch.clamp(actions, -1+self.eps, 1-self.eps))
+            # tanh^-1(action) = gaussian_action
             gaussian_action = TanhBijector.inverse(actions)
             log_prob = self.distribution.log_prob(gaussian_action).sum(dim=-1)
             # change of variable formula from SAC paper: https://arxiv.org/abs/1801.01290
-            log_prob = log_prob - torch.sum(torch.log(1 - actions**2 + self.eps), dim=-1)
+            
+            # SB3 implementation
+            # log_prob = log_prob - torch.sum(torch.log(1 - actions**2 + self.eps), dim=-1)
+            
+            # OpenAI spinningup implementation
+            # NOTE: The correction formula is a little bit magic. To get an understanding 
+            # of where it comes from, check out the original SAC paper (arXiv 1801.01290) 
+            # and look in appendix C. This is a more numerically-stable equivalent to Eq 21.
+            # Try deriving it yourself as a (very difficult) exercise. :)
+            log_prob -= (2*(math.log(2) - gaussian_action - F.softplus(-2*gaussian_action))).sum(dim=1)
             return log_prob
         else:
             return self.distribution.log_prob(actions).sum(dim=-1)
