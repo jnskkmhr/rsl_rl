@@ -32,6 +32,7 @@ class ActorCritic(nn.Module):
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
         squash_output=False,
+        use_std_network=False,
         **kwargs,
     ):
         if kwargs:
@@ -48,21 +49,22 @@ class ActorCritic(nn.Module):
         actor_layers = []
         actor_layers.append(nn.Linear(mlp_input_dim_a, actor_hidden_dims[0]))
         actor_layers.append(activation)
+        
         # for layer_index in range(len(actor_hidden_dims)):
         #     if layer_index == len(actor_hidden_dims) - 1:
         #         actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], num_actions))
         #     else:
         #         actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], actor_hidden_dims[layer_index + 1]))
         #         actor_layers.append(activation)
+        
         for layer_index in range(len(actor_hidden_dims)-1):
             actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], actor_hidden_dims[layer_index + 1]))
             actor_layers.append(activation)
+            
         self.actor = nn.Sequential(*actor_layers)
         
         self.mean_network = nn.Linear(actor_hidden_dims[-1], num_actions)
-        self.std_network = nn.Linear(actor_hidden_dims[-1], num_actions)
         self.init_weights_zero(self.mean_network)
-        self.init_weights_zero(self.std_network)
 
         # Value function
         critic_layers = []
@@ -77,16 +79,23 @@ class ActorCritic(nn.Module):
         self.critic = nn.Sequential(*critic_layers)
 
         print(f"Actor MLP: {self.actor}")
+        print(f"Mean MLP: {self.mean_network}")
         print(f"Critic MLP: {self.critic}")
 
         # Action noise
         self.noise_std_type = noise_std_type
-        # if self.noise_std_type == "scalar":
-        #     self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
-        # elif self.noise_std_type == "log":
-        #     self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
-        # else:
-        #     raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+        self.use_std_network = use_std_network
+        
+        if self.use_std_network:
+            self.std_network = nn.Linear(actor_hidden_dims[-1], num_actions)
+            self.init_weights_zero(self.std_network)
+        else:
+            if self.noise_std_type == "scalar":
+                self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+            elif self.noise_std_type == "log":
+                self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
+            else:
+                raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
 
         # Action distribution (populated in update_distribution)
         self.distribution = None
@@ -135,12 +144,19 @@ class ActorCritic(nn.Module):
         mean = self.mean_network(net_output)
         # compute standard deviation
         if self.noise_std_type == "scalar":
-            std = self.std_network(net_output)
+            if self.use_std_network:
+                std = self.std_network(net_output)
+            else:
+                std = self.std.expand_as(mean)
             std = torch.clamp(std, STD_MIN, STD_MAX)
         elif self.noise_std_type == "log":
-            log_std = self.std_network(net_output)
-            log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
-            std = torch.exp(log_std)
+            if self.use_std_network:
+                log_std = self.std_network(net_output)
+                log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
+                std = torch.exp(log_std)
+            else:
+                std = torch.exp(self.log_std).expand_as(mean)
+                std = torch.clamp(std, STD_MIN, STD_MAX)
         else:
             raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
         # create distribution
