@@ -71,7 +71,6 @@ class ActorCritic(nn.Module):
         self.critic = nn.Sequential(*critic_layers)
 
         print(f"Actor MLP: {self.actor}")
-        print(f"Mean MLP: {self.mean_network}")
         print(f"Critic MLP: {self.critic}")
 
         # Action noise
