@@ -25,6 +25,7 @@ class ActorCritic(nn.Module):
         activation="elu",
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
+        squash_output=False,
         **kwargs,
     ):
         if kwargs:
@@ -79,7 +80,10 @@ class ActorCritic(nn.Module):
         self.distribution = None
         # disable args validation for speedup
         Normal.set_default_validate_args(False)
+        
+        # small number to avoid numerical issues
         self.eps = 1e-6
+        self.squash_output = squash_output
     
     # Initialize weights of last layer to zero same as https://arxiv.org/abs/1812.06298
     def init_weights_zero(self, sequential):
@@ -125,23 +129,73 @@ class ActorCritic(nn.Module):
     # gaussian action 
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
-        gaussian_action = self.distribution.sample()
-        return torch.tanh(gaussian_action)
-        # return self.distribution.sample()
+        if self.squash_output:
+            gaussian_action = self.distribution.sample()
+            return torch.tanh(gaussian_action)
+        else:
+            return self.distribution.sample()
 
     def act_inference(self, observations):
         actions_mean = self.actor(observations)
-        return torch.tanh(actions_mean)
+        if self.squash_output:
+            return torch.tanh(actions_mean)
+        else:
+            return actions_mean
     
     def get_actions_log_prob(self, actions):
-        # inverse of tanh
-        gaussian_action = torch.atanh(torch.clamp(actions, -1+self.eps, 1-self.eps))
-        log_prob = self.distribution.log_prob(gaussian_action).sum(dim=-1)
-        # change of variable formula from SAC paper: https://arxiv.org/abs/1801.01290
-        log_prob = log_prob - torch.sum(torch.log(1 - actions**2 + self.eps), dim=-1)
-        return log_prob
-        # return self.distribution.log_prob(actions).sum(dim=-1)
+        if self.squash_output:
+            # inverse of tanh
+            # gaussian_action = torch.atanh(torch.clamp(actions, -1+self.eps, 1-self.eps))
+            gaussian_action = TanhBijector.inverse(actions)
+            log_prob = self.distribution.log_prob(gaussian_action).sum(dim=-1)
+            # change of variable formula from SAC paper: https://arxiv.org/abs/1801.01290
+            log_prob = log_prob - torch.sum(torch.log(1 - actions**2 + self.eps), dim=-1)
+            return log_prob
+        else:
+            return self.distribution.log_prob(actions).sum(dim=-1)
 
     def evaluate(self, critic_observations, **kwargs):
         value = self.critic(critic_observations)
         return value
+
+class TanhBijector:
+    """
+    Bijective transformation of a probability distribution
+    using a squashing function (tanh)
+
+    :param epsilon: small value to avoid NaN due to numerical imprecision.
+    """
+
+    def __init__(self, epsilon: float = 1e-6):
+        super().__init__()
+        self.epsilon = epsilon
+
+    @staticmethod
+    def forward(x: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(x)
+
+    @staticmethod
+    def atanh(x: torch.Tensor) -> torch.Tensor:
+        """
+        Inverse of Tanh
+
+        Taken from Pyro: https://github.com/pyro-ppl/pyro
+        0.5 * torch.log((1 + x ) / (1 - x))
+        """
+        return 0.5 * (x.log1p() - (-x).log1p())
+
+    @staticmethod
+    def inverse(y: torch.Tensor) -> torch.Tensor:
+        """
+        Inverse tanh.
+
+        :param y:
+        :return:
+        """
+        eps = torch.finfo(y.dtype).eps
+        # Clip the action to avoid NaN
+        return TanhBijector.atanh(y.clamp(min=-1.0 + eps, max=1.0 - eps))
+
+    def log_prob_correction(self, x: torch.Tensor) -> torch.Tensor:
+        # Squash correction (from original SAC implementation)
+        return torch.log(1.0 - torch.tanh(x) ** 2 + self.epsilon)
