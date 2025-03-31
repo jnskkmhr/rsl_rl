@@ -111,7 +111,7 @@ class PPO_LCP(PPO):
             returns_batch,
             old_actions_log_prob_batch,
             old_mu_batch,
-            old_sigma_batch,
+            old_actions_distributions_parameters,
             hid_states_batch,
             masks_batch,
             rnd_state_batch,
@@ -162,7 +162,7 @@ class PPO_LCP(PPO):
             # -- entropy
             # we only keep the entropy of the first augmentation (the original one)
             mu_batch = self.policy.action_mean[:original_batch_size]
-            sigma_batch = self.policy.action_std[:original_batch_size]
+            actions_distributions_batch = self.policy.actions_distribution[:original_batch_size]
             entropy_batch = self.policy.entropy[:original_batch_size]
             # -- Lipschitz constraint (gradient penalty)
             if self.policy.is_recurrent:
@@ -174,14 +174,17 @@ class PPO_LCP(PPO):
 
             # KL
             if self.desired_kl is not None and self.schedule == "adaptive":
+                current_dist = self.policy.build_distribution(actions_distributions_batch)
+                old_dist = self.policy.build_distribution(old_actions_distributions_parameters)
                 with torch.inference_mode():
-                    kl = torch.sum(
-                        torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
-                        + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch))
-                        / (2.0 * torch.square(sigma_batch))
-                        - 0.5,
-                        axis=-1,
-                    ) # type: ignore
+                    # kl = torch.sum(
+                    #     torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
+                    #     + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch))
+                    #     / (2.0 * torch.square(sigma_batch))
+                    #     - 0.5,
+                    #     axis=-1,
+                    # ) # type: ignore
+                    kl = torch.distributions.kl.kl_divergence(current_dist, old_dist)
                     kl_mean = torch.mean(kl)
 
                     # Reduce the KL divergence across all GPUs

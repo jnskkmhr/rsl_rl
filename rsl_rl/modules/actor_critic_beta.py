@@ -25,7 +25,8 @@ class ActorCriticBeta(nn.Module):
         activation="elu",
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
-        initializer:str = "glorot_uniform",
+        initializer:str = "xavier_uniform",
+        init_last_layer_zero: bool = False,
         **kwargs,
     ):
         if kwargs:
@@ -52,6 +53,22 @@ class ActorCriticBeta(nn.Module):
                 actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], actor_hidden_dims[layer_index + 1]))
                 actor_layers.append(activation)
         self.actor = nn.Sequential(*actor_layers)
+        
+        if initializer == "xavier_uniform":
+            self.init_sequential_weights_xavier_uniform(self.actor)
+        elif initializer == "xavier_normal":
+            self.init_sequential_weights_xavier_normal(self.actor)
+        elif initializer == "kaiming_uniform":
+            self.init_sequential_weights_kaiming_uniform(self.actor)
+        elif initializer == "kaiming_normal":
+            self.init_sequential_weights_kaiming_normal(self.actor)
+        elif initializer == "orthogonal":
+            self.init_sequential_weights_orthogonal(self.actor)
+        
+        # with residual learning setup
+        if init_last_layer_zero:
+            self.init_layer_zero(self.alpha)
+            self.init_layer_zero(self.beta)
 
         # Value function
         critic_layers = []
@@ -84,6 +101,49 @@ class ActorCriticBeta(nn.Module):
             torch.nn.init.orthogonal_(module.weight, gain=scales[idx])
             for idx, module in enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))
         ]
+    
+    # weight initializers
+    def init_sequential_weights_xavier_uniform(self, sequential):
+        for layer in sequential:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.xavier_uniform_(layer.bias.view(1, -1))
+    
+    def init_sequential_weights_xavier_normal(self, sequential):
+        for layer in sequential:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_normal_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.xavier_normal_(layer.bias.view(1, -1))
+    
+    def init_sequential_weights_kaiming_uniform(self, sequential):
+        for layer in sequential:
+            if isinstance(layer, nn.Linear):
+                nn.init.kaiming_uniform_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.kaiming_uniform_(layer.bias.view(1, -1))
+    
+    def init_sequential_weights_kaiming_normal(self, sequential):
+        for layer in sequential:
+            if isinstance(layer, nn.Linear):
+                nn.init.kaiming_normal_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.kaiming_normal_(layer.bias.view(1, -1))
+    
+    def init_sequential_weights_orthogonal(self, sequential):
+        for layer in sequential:
+            if isinstance(layer, nn.Linear):
+                nn.init.orthogonal_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.orthogonal_(layer.bias.view(1, -1))
+    
+    # Initialize weights of last layer to zero same as https://arxiv.org/abs/1812.06298
+    def init_layer_zero(self, network):
+        if isinstance(network, nn.Linear):
+            nn.init.zeros_(network.weight)
+            if network.bias is not None:
+                nn.init.zeros_(network.bias)
 
     def reset(self, dones=None):
         pass
@@ -93,16 +153,16 @@ class ActorCriticBeta(nn.Module):
 
     @property
     def action_mean(self):
-        return self.a / (self.a + self.b + 1e-6)
+        return self.a / (self.a + self.b + 1e-6) # type: ignore
     
     @property
     def action_std(self):
-        return torch.sqrt(self.a * self.b / ((self.a + self.b + 1) * (self.a + self.b) ** 2))
+        return torch.sqrt(self.a * self.b / ((self.a + self.b + 1) * (self.a + self.b) ** 2)) # type: ignore
 
     @property
     def actions_distribution(self):
         # Alpha and beta concatenated on an extra dimension
-        return torch.stack([self.a, self.b], dim=-1)
+        return torch.stack([self.a, self.b], dim=-1) # type: ignore
     
     @property
     def entropy(self):

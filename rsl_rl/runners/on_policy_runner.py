@@ -16,6 +16,7 @@ from rsl_rl.algorithms import PPO, PPO_LCP, Distillation
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import (
     ActorCritic,
+    ActorCriticBeta, 
     ActorCriticRecurrent,
     EmpiricalNormalization,
     StudentTeacher,
@@ -69,7 +70,7 @@ class OnPolicyRunner:
 
         # evaluate the policy class
         policy_class = eval(self.policy_cfg.pop("class_name"))
-        policy: ActorCritic | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent = policy_class(
+        policy: ActorCritic | ActorCriticBeta | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent = policy_class(
             num_obs, num_privileged_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
 
@@ -319,18 +320,22 @@ class OnPolicyRunner:
                     self.writer.add_scalar("Episode/" + key, value, locs["it"])
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
 
-        mean_std = self.alg.policy.action_std.mean()
-        fps = int(collection_size / (locs["collection_time"] + locs["learn_time"]))
-
         # -- Losses
         for key, value in locs["loss_dict"].items():
             self.writer.add_scalar(f"Loss/{key}", value, locs["it"])
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
 
         # -- Policy
-        self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
+        action_distribution = self.alg.policy.actions_distribution
+        param1 = action_distribution[..., 0].mean()
+        param2 = action_distribution[..., 1].mean()
+        # mean_std = self.alg.policy.action_std.mean()
+        # self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
+        self.writer.add_scalar("Policy/distribution_param1", param1.item(), locs["it"])
+        self.writer.add_scalar("Policy/distribution_param2", param2.item(), locs["it"])
 
         # -- Performance
+        fps = int(collection_size / (locs["collection_time"] + locs["learn_time"]))
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar("Perf/collection time", locs["collection_time"], locs["it"])
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
@@ -359,7 +364,8 @@ class OnPolicyRunner:
                 f"""{str.center(width, ' ')}\n\n"""
                 f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                     'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+                f"""{'Mean action param1:':>{pad}} {param1.item():.2f}\n"""
+                f"""{'Mean action param2:':>{pad}} {param2.item():.2f}\n"""
             )
             # -- Losses
             for key, value in locs["loss_dict"].items():
@@ -379,7 +385,8 @@ class OnPolicyRunner:
                 f"""{str.center(width, ' ')}\n\n"""
                 f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                     'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+                f"""{'Mean action param1:':>{pad}} {param1.item():.2f}\n"""
+                f"""{'Mean action param2:':>{pad}} {param2.item():.2f}\n"""
             )
             for key, value in locs["loss_dict"].items():
                 log_string += f"""{f'{key}:':>{pad}} {value:.4f}\n"""
