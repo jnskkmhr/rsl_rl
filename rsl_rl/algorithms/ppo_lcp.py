@@ -20,14 +20,13 @@ class PPO_LCP(PPO):
     """Proximal Policy Optimization algorithm (https://arxiv.org/abs/1707.06347) with Lipschitz constant constraint(https://arxiv.org/abs/2410.11825)."""
     def __init__(
         self,
-        actor_critic,
+        policy,
         num_learning_epochs=1,
         num_mini_batches=1,
         clip_param=0.2,
         gamma=0.998,
         lam=0.95,
         value_loss_coef=1.0,
-        gradient_penalty_coef=0.002, # best param according to paper
         entropy_coef=0.0,
         learning_rate=1e-3,
         max_grad_norm=1.0,
@@ -40,10 +39,14 @@ class PPO_LCP(PPO):
         rnd_cfg: dict | None = None,
         # Symmetry parameters
         symmetry_cfg: dict | None = None,
+        # Distributed training parameters
+        multi_gpu_cfg: dict | None = None,
+        # Regularize action
         regularize_action: bool = False,
+        gradient_penalty_coef=0.002, # best param according to paper
     ):
         super().__init__(
-            actor_critic=actor_critic,
+            policy=policy,
             num_learning_epochs=num_learning_epochs,
             num_mini_batches=num_mini_batches,
             clip_param=clip_param,
@@ -60,7 +63,8 @@ class PPO_LCP(PPO):
             normalize_advantage_per_mini_batch=normalize_advantage_per_mini_batch,
             rnd_cfg=rnd_cfg,
             symmetry_cfg=symmetry_cfg,
-            regularize_action=regularize_action,
+            multi_gpu_cfg=multi_gpu_cfg,
+            regularize_action=regularize_action
         )
         
         self.gradient_penalty_coef = gradient_penalty_coef
@@ -70,8 +74,7 @@ class PPO_LCP(PPO):
         gradient_penalty_loss = torch.sum(torch.square(grad_log_prob), dim=-1).mean()
         return gradient_penalty_loss
     
-    
-    def update(self)->tuple:  # noqa: C901
+    def update(self)->dict:  # noqa: C901
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_entropy = 0
@@ -93,7 +96,7 @@ class PPO_LCP(PPO):
             mean_action_reg_loss = None
 
         # generator for mini batches
-        if self.actor_critic.is_recurrent:
+        if self.policy.is_recurrent:
             generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
@@ -112,7 +115,7 @@ class PPO_LCP(PPO):
             hid_states_batch,
             masks_batch,
             rnd_state_batch,
-            action_reg_batch
+            action_reg_batch,
         ) in generator:
 
             # number of augmentations per sample
@@ -132,10 +135,10 @@ class PPO_LCP(PPO):
                 data_augmentation_func = self.symmetry["data_augmentation_func"]
                 # returned shape: [batch_size * num_aug, ...]
                 obs_batch, actions_batch = data_augmentation_func(
-                    obs=obs_batch, actions=actions_batch, env=self.symmetry["_env"], is_critic=False
+                    obs=obs_batch, actions=actions_batch, env=self.symmetry["_env"], obs_type="policy"
                 )
                 critic_obs_batch, _ = data_augmentation_func(
-                    obs=critic_obs_batch, actions=None, env=self.symmetry["_env"], is_critic=True
+                    obs=critic_obs_batch, actions=None, env=self.symmetry["_env"], obs_type="critic"
                 )
                 # compute number of augmentations per sample
                 num_aug = int(obs_batch.shape[0] / original_batch_size)
@@ -148,34 +151,26 @@ class PPO_LCP(PPO):
                 returns_batch = returns_batch.repeat(num_aug, 1)
 
             # Recompute actions log prob and entropy for current batch of transitions
-            # Note: we need to do this because we updated the actor_critic with the new parameters
+            # Note: we need to do this because we updated the policy with the new parameters
             # -- actor
             obs_est_batch = obs_batch.clone()
             obs_est_batch.requires_grad_()
-            self.actor_critic.act(obs_est_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
-            actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
-            # print("action batch size: ", actions_batch.size())
-            # print("action log prob batch size: ", actions_log_prob_batch.size())
-            # print("obs batch size: ", obs_batch.size())
+            self.policy.act(obs_est_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
+            actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
             # -- critic
-            value_batch = self.actor_critic.evaluate(
-                critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
-            )
+            value_batch = self.policy.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
             # -- entropy
             # we only keep the entropy of the first augmentation (the original one)
-            mu_batch = self.actor_critic.action_mean[:original_batch_size]
-            sigma_batch = self.actor_critic.action_std[:original_batch_size]
-            entropy_batch = self.actor_critic.entropy[:original_batch_size]
-            
+            mu_batch = self.policy.action_mean[:original_batch_size]
+            sigma_batch = self.policy.action_std[:original_batch_size]
+            entropy_batch = self.policy.entropy[:original_batch_size]
             # -- Lipschitz constraint (gradient penalty)
-            # if self.actor_critic.is_recurrent:
-            #     # double backward not supported in RNN API
-            #     print("Double backward not supported in RNN API")
-            #     gradient_penalty_loss = torch.tensor(0.0, device=self.device)
-            # else:
-            #     gradient_penalty_loss = self._calc_grad_penalty(obs_est_batch, actions_log_prob_batch)
-            gradient_penalty_loss = self._calc_grad_penalty(obs_est_batch, actions_log_prob_batch)
-            # print(gradient_penalty_loss)
+            if self.policy.is_recurrent:
+                # double backward not supported in RNN API
+                print("Double backward not supported in RNN API")
+                gradient_penalty_loss = torch.tensor(0.0, device=self.device)
+            else:
+                gradient_penalty_loss = self._calc_grad_penalty(obs_est_batch, actions_log_prob_batch)
 
             # KL
             if self.desired_kl is not None and self.schedule == "adaptive":
@@ -189,11 +184,28 @@ class PPO_LCP(PPO):
                     ) # type: ignore
                     kl_mean = torch.mean(kl)
 
-                    if kl_mean > self.desired_kl * 2.0:
-                        self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-                    elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                        self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+                    # Reduce the KL divergence across all GPUs
+                    if self.is_multi_gpu:
+                        torch.distributed.all_reduce(kl_mean, op=torch.distributed.ReduceOp.SUM)
+                        kl_mean /= self.gpu_world_size
 
+                    # Update the learning rate
+                    # Perform this adaptation only on the main process
+                    # TODO: Is this needed? If KL-divergence is the "same" across all GPUs,
+                    #       then the learning rate should be the same across all GPUs.
+                    if self.gpu_global_rank == 0:
+                        if kl_mean > self.desired_kl * 2.0:
+                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                        elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
+                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+
+                    # Update the learning rate for all GPUs
+                    if self.is_multi_gpu:
+                        lr_tensor = torch.tensor(self.learning_rate, device=self.device)
+                        torch.distributed.broadcast(lr_tensor, src=0)
+                        self.learning_rate = lr_tensor.item()
+
+                    # Update the learning rate for all parameter groups
                     for param_group in self.optimizer.param_groups:
                         param_group["lr"] = self.learning_rate
 
@@ -225,13 +237,13 @@ class PPO_LCP(PPO):
                 if not self.symmetry["use_data_augmentation"]:
                     data_augmentation_func = self.symmetry["data_augmentation_func"]
                     obs_batch, _ = data_augmentation_func(
-                        obs=obs_batch, actions=None, env=self.symmetry["_env"], is_critic=False
+                        obs=obs_batch, actions=None, env=self.symmetry["_env"], obs_type="policy"
                     )
                     # compute number of augmentations per sample
                     num_aug = int(obs_batch.shape[0] / original_batch_size)
 
                 # actions predicted by the actor for symmetrically-augmented observations
-                mean_actions_batch = self.actor_critic.act_inference(obs_batch.detach().clone())
+                mean_actions_batch = self.policy.act_inference(obs_batch.detach().clone())
 
                 # compute the symmetrically augmented actions
                 # note: we are assuming the first augmentation is the original one.
@@ -239,7 +251,7 @@ class PPO_LCP(PPO):
                 #   However, the symmetry loss is computed using the mean of the distribution.
                 action_mean_orig = mean_actions_batch[:original_batch_size]
                 _, actions_mean_symm_batch = data_augmentation_func(
-                    obs=None, actions=action_mean_orig, env=self.symmetry["_env"], is_critic=False
+                    obs=None, actions=action_mean_orig, env=self.symmetry["_env"], obs_type="policy"
                 )
 
                 # compute the loss (we skip the first augmentation as it is the original one)
@@ -257,10 +269,10 @@ class PPO_LCP(PPO):
             if self.rnd:
                 # predict the embedding and the target
                 predicted_embedding = self.rnd.predictor(rnd_state_batch)
-                target_embedding = self.rnd.target(rnd_state_batch)
+                target_embedding = self.rnd.target(rnd_state_batch).detach()
                 # compute the loss as the mean squared error
                 mseloss = torch.nn.MSELoss()
-                rnd_loss = mseloss(predicted_embedding, target_embedding.detach())
+                rnd_loss = mseloss(predicted_embedding, target_embedding)
             
             # Action regularization loss
             if self.regularize_action:
@@ -270,16 +282,25 @@ class PPO_LCP(PPO):
                 action_reg_loss = torch.mean(torch.sum(action_reg_batch * torch.norm(mu_batch, dim=1, keepdim=True), dim=1))
                 loss += action_reg_loss
 
-            # Gradient step
+            # Compute the gradients
             # -- For PPO
             self.optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            # -- For RND
+            if self.rnd:
+                self.rnd_optimizer.zero_grad()  # type: ignore
+                rnd_loss.backward()
+
+            # Collect gradients from all GPUs
+            if self.is_multi_gpu:
+                self.reduce_parameters()
+
+            # Apply the gradients
+            # -- For PPO
+            nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
             self.optimizer.step()
             # -- For RND
             if self.rnd_optimizer:
-                self.rnd_optimizer.zero_grad()
-                rnd_loss.backward()
                 self.rnd_optimizer.step()
 
             # Store the losses
@@ -291,6 +312,8 @@ class PPO_LCP(PPO):
             if mean_rnd_loss is not None:
                 mean_rnd_loss += rnd_loss.item()
             # -- Symmetry loss
+            if mean_symmetry_loss is not None:
+                mean_symmetry_loss += symmetry_loss.item()
             # -- Action regularization loss
             if mean_action_reg_loss is not None:
                 mean_action_reg_loss += action_reg_loss.item()
@@ -313,4 +336,18 @@ class PPO_LCP(PPO):
         # -- Clear the storage
         self.storage.clear()
 
-        return mean_value_loss, mean_surrogate_loss, mean_entropy, mean_rnd_loss, mean_symmetry_loss, mean_action_reg_loss, mean_gradient_penalty_loss
+        # construct the loss dictionary
+        loss_dict = {
+            "value_function": mean_value_loss,
+            "surrogate": mean_surrogate_loss,
+            "entropy": mean_entropy,
+            "gradient_penalty": mean_gradient_penalty_loss,
+        }
+        if self.rnd:
+            loss_dict["rnd"] = mean_rnd_loss
+        if self.symmetry:
+            loss_dict["symmetry"] = mean_symmetry_loss
+        if self.regularize_action:
+            loss_dict["action_reg"] = mean_action_reg_loss
+
+        return loss_dict
