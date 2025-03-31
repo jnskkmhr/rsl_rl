@@ -153,7 +153,8 @@ class ActorCriticBeta(nn.Module):
 
     @property
     def action_mean(self):
-        return self.a / (self.a + self.b + 1e-6) # type: ignore
+        action_mean = self.a / (self.a + self.b + 1e-6) # type: ignore
+        return self.scale_action(action_mean)
     
     @property
     def action_std(self):
@@ -182,14 +183,16 @@ class ActorCriticBeta(nn.Module):
 
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
-        return self.distribution.sample()
+        beta_action = self.distribution.sample()
+        return self.scale_action(beta_action)
 
     def get_actions_log_prob(self, actions):
-        return self.distribution.log_prob(actions).sum(dim=-1)
+        beta_actions = self.unscale_action(actions)
+        return self.distribution.log_prob(beta_actions).sum(dim=-1) - torch.log(torch.tensor(2.0, device=actions.device))
 
     def act_inference(self, observations):
-        actions_mean = self.actor(observations)
-        return actions_mean
+        self.update_distribution(observations)
+        return self.action_mean
 
     def evaluate(self, critic_observations, **kwargs):
         value = self.critic(critic_observations)
@@ -210,3 +213,9 @@ class ActorCriticBeta(nn.Module):
 
         super().load_state_dict(state_dict, strict=strict)
         return True
+    
+    def scale_action(self, action):
+        return 2*action - 1
+    
+    def unscale_action(self, action):
+        return (action + 1) / 2
