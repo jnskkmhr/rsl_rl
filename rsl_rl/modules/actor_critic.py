@@ -32,6 +32,7 @@ class ActorCritic(nn.Module):
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
         squash_output=False,
+        initializer:str = "glorot_uniform",
         **kwargs,
     ):
         if kwargs:
@@ -56,7 +57,19 @@ class ActorCritic(nn.Module):
                 actor_layers.append(activation)
 
         self.actor = nn.Sequential(*actor_layers)
-        self.init_sequential_weights_zero(self.actor)
+        
+        if initializer == "zeros":
+            self.init_sequential_weights_zero(self.actor)
+        elif initializer == "xavier_uniform":
+            self.init_sequential_weights_xavier_uniform(self.actor)
+        elif initializer == "xavier_normal":
+            self.init_sequential_weights_xavier_normal(self.actor)
+        elif initializer == "kaiming_uniform":
+            self.init_sequential_weights_kaiming_uniform(self.actor)
+        elif initializer == "kaiming_normal":
+            self.init_sequential_weights_kaiming_normal(self.actor)
+        elif initializer == "orthogonal":
+            self.init_sequential_weights_orthogonal(self.actor)
 
         # Value function
         critic_layers = []
@@ -92,6 +105,8 @@ class ActorCritic(nn.Module):
         self.eps = 1e-6
         self.squash_output = squash_output
     
+    
+    # weight initializers
     # Initialize weights of last layer to zero same as https://arxiv.org/abs/1812.06298
     def init_sequential_weights_zero(self, sequential):
         layer = sequential[-1]
@@ -99,6 +114,41 @@ class ActorCritic(nn.Module):
             nn.init.zeros_(layer.weight)
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
+                
+    def init_sequential_weights_xavier_uniform(self, sequential):
+        for layer in sequential:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+    
+    def init_sequential_weights_xavier_normal(self, sequential):
+        for layer in sequential:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_normal_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+    
+    def init_sequential_weights_kaiming_uniform(self, sequential):
+        for layer in sequential:
+            if isinstance(layer, nn.Linear):
+                nn.init.kaiming_uniform_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+    
+    def init_sequential_weights_kaiming_normal(self, sequential):
+        for layer in sequential:
+            if isinstance(layer, nn.Linear):
+                nn.init.kaiming_normal_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+    
+    def init_sequential_weights_orthogonal(self, sequential):
+        for layer in sequential:
+            if isinstance(layer, nn.Linear):
+                nn.init.orthogonal_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
     
     def init_weights_zero(self, network):
         if isinstance(network, nn.Linear):
@@ -127,8 +177,8 @@ class ActorCritic(nn.Module):
     def update_distribution(self, observations):
         # compute mean
         mean = self.actor(observations)
-        # squash mean begore putting it to gaussian
-        mean = torch.tanh(mean) 
+        # # squash mean begore putting it to gaussian
+        # mean = torch.tanh(mean) 
         
         # compute standard deviation
         if self.noise_std_type == "scalar":
@@ -142,7 +192,6 @@ class ActorCritic(nn.Module):
         # create distribution
         self.distribution = Normal(mean, std)
     
-    # gaussian action 
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
         if self.squash_output:
@@ -153,7 +202,7 @@ class ActorCritic(nn.Module):
 
     def act_inference(self, observations):
         actions_mean = self.actor(observations)
-        actions_mean = torch.tanh(actions_mean) # squash mean
+        # actions_mean = torch.tanh(actions_mean) # squash mean
         if self.squash_output:
             return torch.tanh(actions_mean)
         else:
@@ -167,14 +216,14 @@ class ActorCritic(nn.Module):
             # change of variable formula from SAC paper: https://arxiv.org/abs/1801.01290
             
             # SB3 implementation
-            # log_prob = log_prob - torch.sum(torch.log(1 - actions**2 + self.eps), dim=-1)
+            log_prob = log_prob - torch.sum(torch.log(1 - actions**2 + self.eps), dim=-1)
             
             # OpenAI spinningup implementation
             # NOTE: The correction formula is a little bit magic. To get an understanding 
             # of where it comes from, check out the original SAC paper (arXiv 1801.01290) 
             # and look in appendix C. This is a more numerically-stable equivalent to Eq 21.
             # Try deriving it yourself as a (very difficult) exercise. :)
-            log_prob -= (2*(math.log(2) - gaussian_action - F.softplus(-2*gaussian_action))).sum(dim=1)
+            # log_prob -= (2*(math.log(2) - gaussian_action - F.softplus(-2*gaussian_action))).sum(dim=1)
             return log_prob
         else:
             return self.distribution.log_prob(actions).sum(dim=-1)
