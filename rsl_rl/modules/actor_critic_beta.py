@@ -188,7 +188,8 @@ class ActorCriticBeta(nn.Module):
 
     def get_actions_log_prob(self, actions):
         beta_actions = self.unscale_action(actions)
-        return self.distribution.log_prob(beta_actions).sum(dim=-1) - torch.log(torch.tensor(2.0, device=actions.device))
+        return self.distribution.log_prob(beta_actions).sum(dim=-1)
+        # return self.distribution.log_prob(beta_actions).sum(dim=-1) - torch.log(torch.tensor(2.0, device=actions.device))
 
     def act_inference(self, observations):
         self.update_distribution(observations)
