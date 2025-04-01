@@ -326,13 +326,8 @@ class OnPolicyRunner:
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
 
         # -- Policy
-        action_distribution = self.alg.policy.actions_distribution
-        param1 = action_distribution[..., 0].mean()
-        param2 = action_distribution[..., 1].mean()
-        # mean_std = self.alg.policy.action_std.mean()
-        # self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
-        self.writer.add_scalar("Policy/distribution_param1", param1.item(), locs["it"])
-        self.writer.add_scalar("Policy/distribution_param2", param2.item(), locs["it"])
+        mean_std = self.alg.policy.action_std.mean()
+        self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
 
         # -- Performance
         fps = int(collection_size / (locs["collection_time"] + locs["learn_time"]))
@@ -364,8 +359,7 @@ class OnPolicyRunner:
                 f"""{str.center(width, ' ')}\n\n"""
                 f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                     'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                f"""{'Mean action param1:':>{pad}} {param1.item():.2f}\n"""
-                f"""{'Mean action param2:':>{pad}} {param2.item():.2f}\n"""
+                f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
             )
             # -- Losses
             for key, value in locs["loss_dict"].items():
@@ -385,8 +379,7 @@ class OnPolicyRunner:
                 f"""{str.center(width, ' ')}\n\n"""
                 f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                     'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                f"""{'Mean action param1:':>{pad}} {param1.item():.2f}\n"""
-                f"""{'Mean action param2:':>{pad}} {param2.item():.2f}\n"""
+                f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
             )
             for key, value in locs["loss_dict"].items():
                 log_string += f"""{f'{key}:':>{pad}} {value:.4f}\n"""
