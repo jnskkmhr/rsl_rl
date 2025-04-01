@@ -39,7 +39,7 @@ class OnPolicyRunner:
         self._configure_multi_gpu()
 
         # resolve training type depending on the algorithm
-        if self.alg_cfg["class_name"] == "PPO":
+        if self.alg_cfg["class_name"] == "PPO" or self.alg_cfg["class_name"] == "PPO_LCP":
             self.training_type = "rl"
         elif self.alg_cfg["class_name"] == "Distillation":
             self.training_type = "distillation"
