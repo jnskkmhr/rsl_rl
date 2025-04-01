@@ -31,9 +31,10 @@ class ActorCritic(nn.Module):
         activation="elu",
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
-        squash_output=False,
         initializer:str = "xavier_uniform",
         init_last_layer_zero: bool = False,
+        clip_actions=False,
+        clip_actions_range: tuple = (-1.0, 1.0),
         **kwargs,
     ):
         if kwargs:
@@ -58,6 +59,12 @@ class ActorCritic(nn.Module):
                 actor_layers.append(activation)
 
         self.actor = nn.Sequential(*actor_layers)
+        
+        self.eps = 1e-6
+        self.clip_actions = clip_actions
+        self.clip_actions_range = clip_actions_range
+        if self.clip_actions:
+            self.clipping_layer = nn.Tanh()
         
         if initializer == "xavier_uniform":
             self.init_sequential_weights_xavier_uniform(self.actor)
@@ -103,10 +110,6 @@ class ActorCritic(nn.Module):
         self.distribution = None
         # disable args validation for speedup
         Normal.set_default_validate_args(False)
-        
-        # small number to avoid numerical issues
-        self.eps = 1e-6
-        self.squash_output = squash_output
     
     
     # weight initializers
@@ -160,7 +163,10 @@ class ActorCritic(nn.Module):
 
     @property
     def action_mean(self):
-        return self.distribution.mean
+        mode = self.distribution.mean
+        if self.clip_actions:
+            mode = ((mode + 1) /2.0)* (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
+        return mode
 
     @property
     def action_std(self):
@@ -182,14 +188,14 @@ class ActorCritic(nn.Module):
     def update_distribution(self, observations):
         # compute mean
         mean = self.actor(observations)
-        
+        if self.clip_actions:
+            mean = self.clipping_layer(mean)
+
         # compute standard deviation
         if self.noise_std_type == "scalar":
             std = self.std.expand_as(mean)
-            std = torch.clamp(std, STD_MIN, STD_MAX)
         elif self.noise_std_type == "log":
             std = torch.exp(self.log_std).expand_as(mean)
-            std = torch.clamp(std, STD_MIN, STD_MAX)
         else:
             raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
         # create distribution
@@ -197,37 +203,30 @@ class ActorCritic(nn.Module):
     
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
-        if self.squash_output:
-            gaussian_action = self.distribution.sample()
-            return torch.tanh(gaussian_action)
-        else:
-            return self.distribution.sample()
-
-    def act_inference(self, observations):
-        actions_mean = self.actor(observations)
-        if self.squash_output:
-            return torch.tanh(actions_mean)
-        else:
-            return actions_mean
+        act = self.distribution.sample()
+        if self.clip_actions:
+            # Apply tanh to clip the actions to [-1, 1]
+            act = self.clipping_layer(act)
+            # Rescale the actions to the desired range
+            act = ((act + 1) / 2.0) * (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
+        return act
     
     def get_actions_log_prob(self, actions):
-        if self.squash_output:
-            # change of variable formula from SAC paper: https://arxiv.org/abs/1801.01290
-            gaussian_action = TanhBijector.inverse(actions)
-            log_prob = self.distribution.log_prob(gaussian_action).sum(dim=-1)
-            
-            # 1. SB3 implementation
-            log_prob = log_prob - torch.sum(torch.log(1 - actions**2 + self.eps), dim=-1)
-            
-            # 2. OpenAI spinningup implementation
-            # NOTE: The correction formula is a little bit magic. To get an understanding 
-            # of where it comes from, check out the original SAC paper (arXiv 1801.01290) 
-            # and look in appendix C. This is a more numerically-stable equivalent to Eq 21.
-            # Try deriving it yourself as a (very difficult) exercise. :)
-            # log_prob -= (2*(math.log(2) - gaussian_action - F.softplus(-2*gaussian_action))).sum(dim=1)
-            return log_prob
+        # Scale the actions to [-1, 1] before computing the log probability.
+        if self.clip_actions:
+            # The unscaled actions still have the tanh applied to them.
+            unscaled_actions = (actions - self.clip_actions_range[0]) / (self.clip_actions_range[1] - self.clip_actions_range[0]) * 2.0 - 1.0
+            # Revert the tanh to get the original actions. We use the TanhBijector to avoid numerical issues.
+            gaussian_actions = self.inverse_tanh(unscaled_actions)
+            return (self.distribution.log_prob(gaussian_actions) - torch.log(1 - unscaled_actions*unscaled_actions + 1e-6)).sum(dim=-1)
         else:
             return self.distribution.log_prob(actions).sum(dim=-1)
+
+    def act_inference(self, observations):
+        mode= self.actor(observations)
+        if self.clip_actions:
+            mode = ((mode + 1) / 2.0) * (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
+        return mode
 
     def evaluate(self, critic_observations, **kwargs):
         value = self.critic(critic_observations)
@@ -248,45 +247,12 @@ class ActorCritic(nn.Module):
 
         super().load_state_dict(state_dict, strict=strict)
         return True
-
-class TanhBijector:
-    """
-    Bijective transformation of a probability distribution
-    using a squashing function (tanh)
-
-    :param epsilon: small value to avoid NaN due to numerical imprecision.
-    """
-
-    def __init__(self, epsilon: float = 1e-6):
-        super().__init__()
-        self.epsilon = epsilon
-
+    
     @staticmethod
-    def forward(x: torch.Tensor) -> torch.Tensor:
-        return torch.tanh(x)
-
-    @staticmethod
-    def atanh(x: torch.Tensor) -> torch.Tensor:
-        """
-        Inverse of Tanh
-
-        Taken from Pyro: https://github.com/pyro-ppl/pyro
-        0.5 * torch.log((1 + x ) / (1 - x))
-        """
+    def atanh(x):
         return 0.5 * (x.log1p() - (-x).log1p())
-
+    
     @staticmethod
-    def inverse(y: torch.Tensor) -> torch.Tensor:
-        """
-        Inverse tanh.
-
-        :param y:
-        :return:
-        """
+    def inverse_tanh(y):
         eps = torch.finfo(y.dtype).eps
-        # Clip the action to avoid NaN
-        return TanhBijector.atanh(y.clamp(min=-1.0 + eps, max=1.0 - eps))
-
-    def log_prob_correction(self, x: torch.Tensor) -> torch.Tensor:
-        # Squash correction (from original SAC implementation)
-        return torch.log(1.0 - torch.tanh(x) ** 2 + self.epsilon)
+        return ActorCritic.atanh(y.clamp(min=-1.0 + eps, max=1.0 - eps))

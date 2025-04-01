@@ -27,6 +27,8 @@ class ActorCriticBeta(nn.Module):
         noise_std_type: str = "scalar",
         initializer:str = "xavier_uniform",
         init_last_layer_zero: bool = False,
+        clip_actions: bool = True,
+        clip_actions_range: tuple = (-1.0, 1.0),
         **kwargs,
     ):
         if kwargs:
@@ -53,6 +55,8 @@ class ActorCriticBeta(nn.Module):
                 actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], actor_hidden_dims[layer_index + 1]))
                 actor_layers.append(activation)
         self.actor = nn.Sequential(*actor_layers)
+        
+        self.clip_actions_range = clip_actions_range
         
         if initializer == "xavier_uniform":
             self.init_sequential_weights_xavier_uniform(self.actor)
@@ -153,8 +157,9 @@ class ActorCriticBeta(nn.Module):
 
     @property
     def action_mean(self):
-        action_mean = self.a / (self.a + self.b + 1e-6) # type: ignore
-        return self.scale_action(action_mean)
+        mode = self.a / (self.a + self.b + 1e-6) # type: ignore
+        mode_rescaled = mode * (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
+        return mode_rescaled
     
     @property
     def action_std(self):
@@ -183,17 +188,24 @@ class ActorCriticBeta(nn.Module):
 
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
-        beta_action = self.distribution.sample()
-        return self.scale_action(beta_action)
+        act = self.distribution.sample()
+        act_rescaled = act * (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
+        return act_rescaled
 
     def get_actions_log_prob(self, actions):
-        beta_actions = self.unscale_action(actions)
-        return self.distribution.log_prob(beta_actions).sum(dim=-1)
-        # return self.distribution.log_prob(beta_actions).sum(dim=-1) - torch.log(torch.tensor(2.0, device=actions.device))
+        # Unscale the actions to [0, 1] before computing the log probability.
+        unscaled_actions = (actions - self.clip_actions_range[0]) / (self.clip_actions_range[1] - self.clip_actions_range[0])
+        # For numerical stability, clip the actions to [1e-5, 1 - 1e-5].
+        unscaled_actions = torch.clamp(unscaled_actions, 1e-5, 1 - 1e-5)
+        return self.distribution.log_prob(unscaled_actions).sum(dim=-1)
 
     def act_inference(self, observations):
-        self.update_distribution(observations)
-        return self.action_mean
+        latent = self.actor(observations)
+        self.a = self.alpha_activation(self.alpha(latent))
+        self.b = self.beta_activation(self.beta(latent))
+        mode = self.a / (self.a + self.b)
+        mode_rescaled = mode * (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
+        return mode_rescaled
 
     def evaluate(self, critic_observations, **kwargs):
         value = self.critic(critic_observations)
@@ -214,9 +226,3 @@ class ActorCriticBeta(nn.Module):
 
         super().load_state_dict(state_dict, strict=strict)
         return True
-    
-    def scale_action(self, action):
-        return 2*action - 1
-    
-    def unscale_action(self, action):
-        return (action + 1) / 2
