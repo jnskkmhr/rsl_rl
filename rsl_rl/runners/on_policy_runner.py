@@ -328,8 +328,8 @@ class OnPolicyRunner:
         # -- Policy
         mean_std = self.alg.policy.action_std.mean()
         distribution_params = self.alg.policy.actions_distribution
-        self.writer.add_histogram("Policy/param1", distribution_params[..., 0].mean().item(), locs["it"])
-        self.writer.add_histogram("Policy/param2", distribution_params[..., 1].mean().item(), locs["it"])
+        self.writer.add_scalar("Policy/param1", distribution_params[..., 0].mean().item(), locs["it"])
+        self.writer.add_scalar("Policy/param2", distribution_params[..., 1].mean().item(), locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
 
         # -- Performance
