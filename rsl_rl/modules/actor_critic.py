@@ -76,6 +76,8 @@ class ActorCritic(nn.Module):
             self.init_sequential_weights_kaiming_normal(self.actor)
         elif initializer == "orthogonal":
             self.init_sequential_weights_orthogonal(self.actor)
+        elif initializer == "default":
+            pass
         
         # with residual learning setup
         if init_last_layer_zero:

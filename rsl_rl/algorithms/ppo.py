@@ -322,6 +322,12 @@ class PPO:
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+            
+            # print sarrogate loss log
+            print("sampled log prob: \n", old_actions_log_prob_batch[:5])
+            print("calculated log prob: \n", actions_log_prob_batch[:5])
+            print("ratio: \n", ratio[:5])
+            print("advantages: \n", advantages_batch[:5])
 
             # Value function loss
             if self.use_clipped_value_loss:
@@ -335,6 +341,18 @@ class PPO:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+            
+            # add nan
+            if torch.isnan(loss):
+                print("surrogate_loss:", surrogate_loss.item())
+                print("value loss:", value_loss.item())
+                print("entropy:", entropy_batch.mean().item())
+                print("mu batch: ", mu_batch)
+                print("action distribution batch: ", actions_distributions_batch)
+                print("action log batch: ", actions_log_prob_batch)
+                print("old action log batch: ", old_actions_log_prob_batch)
+                print("value batch: ",value_batch)
+                raise ValueError("Loss is NaN. Check your implementation.")
 
             # Symmetry loss
             if self.symmetry:

@@ -263,19 +263,6 @@ class OnPolicyRunner:
 
             # update policy
             loss_dict = self.alg.update()
-            
-            # monitor nan
-            for loss in loss_dict.values():
-                if math.isnan(loss):
-                    print("loss: ", loss)
-                    print("policy mean: ", self.alg.policy.action_mean)
-                    print("policy std: ", self.alg.policy.action_std)
-                    print("policy action distribution: ", self.alg.policy.actions_distribution)
-                    print("policy entropy: ", self.alg.policy.entropy)
-                    print("action log probs: ", self.alg.transition.actions_log_prob)
-                    print("rewards: ", self.alg.transition.rewards)
-                    print("values: ", self.alg.transition.values)
-                    raise ValueError("Loss is NaN. Please check your implementation.")
 
             stop = time.time()
             learn_time = stop - start
@@ -410,7 +397,7 @@ class OnPolicyRunner:
             f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] - locs['start_iter'] + 1) * (
                 locs['start_iter'] + locs['num_learning_iterations'] - locs['it']):.1f}s\n"""
         )
-        print(log_string)
+        # print(log_string)
 
     def save(self, path: str, infos=None):
         # -- Save model
