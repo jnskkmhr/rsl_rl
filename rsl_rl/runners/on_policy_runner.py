@@ -397,7 +397,7 @@ class OnPolicyRunner:
             f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] - locs['start_iter'] + 1) * (
                 locs['start_iter'] + locs['num_learning_iterations'] - locs['it']):.1f}s\n"""
         )
-        # print(log_string)
+        print(log_string)
 
     def save(self, path: str, infos=None):
         # -- Save model

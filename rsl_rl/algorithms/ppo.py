@@ -323,11 +323,11 @@ class PPO:
             )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
             
-            # print sarrogate loss log
-            print("sampled log prob: \n", old_actions_log_prob_batch[:5])
-            print("calculated log prob: \n", actions_log_prob_batch[:5])
-            print("ratio: \n", ratio[:5])
-            print("advantages: \n", advantages_batch[:5])
+            # # print sarrogate loss log
+            # print("sampled log prob: \n", old_actions_log_prob_batch[:5])
+            # print("calculated log prob: \n", actions_log_prob_batch[:5])
+            # print("ratio: \n", ratio[:5])
+            # print("advantages: \n", advantages_batch[:5])
 
             # Value function loss
             if self.use_clipped_value_loss:
@@ -345,8 +345,14 @@ class PPO:
             # add nan
             if torch.isnan(loss):
                 print("surrogate_loss:", surrogate_loss.item())
+                print("calculated log prob: \n", actions_log_prob_batch[:5])
+                print("ratio: \n", ratio[:5])
+                print("advantages: \n", advantages_batch[:5])
+                
                 print("value loss:", value_loss.item())
+                
                 print("entropy:", entropy_batch.mean().item())
+                
                 print("mu batch: ", mu_batch)
                 print("action distribution batch: ", actions_distributions_batch)
                 print("action log batch: ", actions_log_prob_batch)

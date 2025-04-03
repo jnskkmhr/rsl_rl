@@ -29,6 +29,7 @@ class ActorCriticBeta(nn.Module):
         init_last_layer_zero: bool = False,
         clip_actions: bool = True,
         clip_actions_range: tuple = (-1.0, 1.0),
+        softplus_beta: list[float] = [0.1, 0.1],
         **kwargs,
     ):
         if kwargs:
@@ -49,8 +50,8 @@ class ActorCriticBeta(nn.Module):
             if layer_index == len(actor_hidden_dims) - 1:
                 self.alpha = nn.Linear(actor_hidden_dims[layer_index], num_actions)
                 self.beta = nn.Linear(actor_hidden_dims[layer_index], num_actions)
-                self.alpha_activation = nn.Softplus()
-                self.beta_activation = nn.Softplus()
+                self.alpha_activation = nn.Softplus(beta=softplus_beta[0])
+                self.beta_activation = nn.Softplus(beta=softplus_beta[1])
             else:
                 actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], actor_hidden_dims[layer_index + 1]))
                 actor_layers.append(activation)
@@ -160,7 +161,7 @@ class ActorCriticBeta(nn.Module):
     @property
     def action_mean(self):
         mode = self.a / (self.a + self.b + 1e-6) # type: ignore
-        print("action mean: \n", mode[:5])
+        # print("action mean: \n", mode[:5])
         mode_rescaled = mode * (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
         return mode_rescaled
     
@@ -184,10 +185,16 @@ class ActorCriticBeta(nn.Module):
     def update_distribution(self, observations):
         # compute mean
         latent = self.actor(observations)
-        self.a = self.alpha_activation(self.alpha(latent)) + 1.0 + self.eps
-        self.b = self.beta_activation(self.beta(latent)) + 1.0 + self.eps
-        print("alpha: \n", self.a[:5])
-        print("beta: \n", self.b[:5])
+        alpha_latent = self.alpha(latent)
+        beta_latent = self.beta(latent)
+        # print("alpha b4 clip: \n", alpha_latent[:5])
+        # print("beta b4 clip: \n", beta_latent[:5])
+        self.a = self.alpha_activation(alpha_latent) + 1.0 + self.eps
+        self.b = self.beta_activation(beta_latent) + 1.0 + self.eps
+        # self.a = self.alpha_activation(self.alpha(latent)) + 1.0 + self.eps
+        # self.b = self.beta_activation(self.beta(latent)) + 1.0 + self.eps
+        # print("alpha: \n", self.a[:5])
+        # print("beta: \n", self.b[:5])
         # # clip alpha and beta to avoid numerical issues
         # self.a = torch.clamp(self.a, max=1e5)
         # self.b = torch.clamp(self.b, max=1e5)
