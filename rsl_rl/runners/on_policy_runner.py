@@ -262,6 +262,19 @@ class OnPolicyRunner:
 
             # update policy
             loss_dict = self.alg.update()
+            
+            # monitor nan
+            for loss in loss_dict.values():
+                loss = loss + float("nan") # test
+                if loss == float("nan"):
+                    print("loss: ", loss)
+                    print("policy mean: ", self.alg.policy.action_mean)
+                    print("policy std: ", self.alg.policy.action_std)
+                    print("policy action distribution: ", self.alg.policy.actions_distribution)
+                    print("policy entropy: ", self.alg.policy.entropy)
+                    print("rollout: ", self.alg.transition)
+                    # print(locals())
+                    raise ValueError("Loss is NaN. Please check your implementation.")
 
             stop = time.time()
             learn_time = stop - start
