@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import math
 import statistics
 import time
 import torch
@@ -265,15 +266,15 @@ class OnPolicyRunner:
             
             # monitor nan
             for loss in loss_dict.values():
-                loss = loss + float("nan") # test
-                if loss == float("nan"):
+                if math.isnan(loss):
                     print("loss: ", loss)
                     print("policy mean: ", self.alg.policy.action_mean)
                     print("policy std: ", self.alg.policy.action_std)
                     print("policy action distribution: ", self.alg.policy.actions_distribution)
                     print("policy entropy: ", self.alg.policy.entropy)
-                    print("rollout: ", self.alg.transition)
-                    # print(locals())
+                    print("action log probs: ", self.alg.transition.actions_log_prob)
+                    print("rewards: ", self.alg.transition.rewards)
+                    print("values: ", self.alg.transition.values)
                     raise ValueError("Loss is NaN. Please check your implementation.")
 
             stop = time.time()
