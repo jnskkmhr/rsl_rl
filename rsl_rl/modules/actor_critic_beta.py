@@ -204,7 +204,7 @@ class ActorCriticBeta(nn.Module):
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
         act = self.distribution.sample()
-        print("sampled action: \n", act[:5])
+        # print("sampled action: \n", act[:5])
         act_rescaled = act * (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
         return act_rescaled
 
