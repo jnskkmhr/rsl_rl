@@ -8,7 +8,6 @@ import statistics
 import time
 import torch
 from collections import deque
-from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 
 import rsl_rl
 from rsl_rl.algorithms import PPO
@@ -20,7 +19,7 @@ from rsl_rl.utils import store_code_state
 class OnPolicyRunner:
     """On-policy runner for training and evaluation."""
 
-    def __init__(self, env: VecEnv, train_cfg, log_dir=None, device="cpu"):
+    def __init__(self, env: VecEnv, train_cfg:dict, log_dir:str|None=None, device="cpu"):
         self.cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
@@ -65,7 +64,7 @@ class OnPolicyRunner:
         self.git_status_repos = [rsl_rl.__file__]
         
         # make directory for model 
-        os.makedirs(os.path.join(self.log_dir, "model"), exist_ok=True)
+        os.makedirs(os.path.join(self.log_dir, "model"), exist_ok=True) # type: ignore
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
         # initialize writer
@@ -85,9 +84,10 @@ class OnPolicyRunner:
                 self.writer = WandbSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=self.cfg)
                 self.writer.log_config(self.env.cfg, self.cfg, self.alg_cfg, self.policy_cfg)
             elif self.logger_type == "tensorboard":
-                self.writer = TensorboardSummaryWriter(log_dir=self.log_dir, flush_secs=10)
+                from torch.utils.tensorboard.writer import SummaryWriter
+                self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
             else:
-                raise AssertionError("logger type not found")
+                raise ValueError("Logger type not found. Please choose 'neptune', 'wandb' or 'tensorboard'.")
 
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(
@@ -112,7 +112,7 @@ class OnPolicyRunner:
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, critic_obs)
-                    obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
+                    obs, rewards, dones, infos = self.env.step(actions.to(self.env.device)) # type: ignore
                     # move to the right device
                     obs, critic_obs, rewards, dones = (
                         obs.to(self.device),
@@ -152,15 +152,15 @@ class OnPolicyRunner:
                 start = stop
                 self.alg.compute_returns(critic_obs)
                 
-            # added lipschitz regularization
-            mean_value_loss, mean_surrogate_loss, mean_lipschitz_reg_loss = self.alg.update()
+            # update policy
+            loss_dict = self.alg.update()
             stop = time.time()
             learn_time = stop - start
             self.current_learning_iteration = it
             if self.log_dir is not None:
                 self.log(locals())
             if it % self.save_interval == 0:
-                self.save(os.path.join(self.log_dir, "model", f"model_{it}.pt"))
+                self.save(os.path.join(self.log_dir, "model", f"model_{it}.pt")) # type: ignore
             ep_infos.clear()
             if it == start_iter:
                 # obtain all the diff files
@@ -168,9 +168,9 @@ class OnPolicyRunner:
                 # if possible store them to wandb
                 if self.logger_type in ["wandb", "neptune"] and git_file_paths:
                     for path in git_file_paths:
-                        self.writer.save_file(path)
+                        self.writer.save_file(path) # type: ignore
 
-        self.save(os.path.join(self.log_dir, "model", f"model_{self.current_learning_iteration}.pt"))
+        self.save(os.path.join(self.log_dir, "model", f"model_{self.current_learning_iteration}.pt")) # type: ignore
 
     def log(self, locs: dict, width: int = 80, pad: int = 35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
@@ -226,24 +226,25 @@ class OnPolicyRunner:
                 f"""{str.center(width, ' ')}\n\n"""
                 f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
                 f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
                 f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
             )
             #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
             #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+            # -- Losses
+            for key, value in locs["loss_dict"].items():
+                log_string += f"""{f'Mean {key} loss:':>{pad}} {value:.4f}\n"""
         else:
             log_string = (
                 f"""{'#' * width}\n"""
                 f"""{str.center(width, ' ')}\n\n"""
                 f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
             )
+            for key, value in locs["loss_dict"].items():
+                log_string += f"""{f'{key}:':>{pad}} {value:.4f}\n"""
             #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
             #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
 
@@ -272,7 +273,7 @@ class OnPolicyRunner:
 
         # Upload model to external logging service
         if self.logger_type in ["neptune", "wandb"]:
-            self.writer.save_model(path, self.current_learning_iteration)
+            self.writer.save_model(path, self.current_learning_iteration) # type: ignore
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)

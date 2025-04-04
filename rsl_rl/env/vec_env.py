@@ -48,6 +48,9 @@ class VecEnv(ABC):
     """
     device: torch.device
     """Device to use."""
+    
+    cfg: dict | object
+    """Configuration object."""
 
     """
     Operations.

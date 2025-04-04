@@ -9,6 +9,27 @@ import pathlib
 import torch
 
 
+def resolve_nn_activation(act_name: str) -> torch.nn.Module:
+    if act_name == "elu":
+        return torch.nn.ELU()
+    elif act_name == "selu":
+        return torch.nn.SELU()
+    elif act_name == "relu":
+        return torch.nn.ReLU()
+    elif act_name == "crelu":
+        return torch.nn.CELU()
+    elif act_name == "lrelu":
+        return torch.nn.LeakyReLU()
+    elif act_name == "tanh":
+        return torch.nn.Tanh()
+    elif act_name == "sigmoid":
+        return torch.nn.Sigmoid()
+    elif act_name == "identity":
+        return torch.nn.Identity()
+    else:
+        raise ValueError(f"Invalid activation function '{act_name}'.")
+
+
 def split_and_pad_trajectories(tensor, dones):
     """Splits trajectories at done indices. Then concatenates them and pads with zeros up to the length og the longest trajectory.
     Returns masks corresponding to valid parts of the trajectories
@@ -40,7 +61,7 @@ def split_and_pad_trajectories(tensor, dones):
     # add at least one full length trajectory
     trajectories = trajectories + (torch.zeros(tensor.shape[0], tensor.shape[-1], device=tensor.device),)
     # pad the trajectories to the length of the longest trajectory
-    padded_trajectories = torch.nn.utils.rnn.pad_sequence(trajectories)
+    padded_trajectories = torch.nn.utils.rnn.pad_sequence(trajectories) # type: ignore
     # remove the added tensor
     padded_trajectories = padded_trajectories[:, :-1]
 
