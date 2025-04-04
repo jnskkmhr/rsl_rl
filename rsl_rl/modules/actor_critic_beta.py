@@ -161,7 +161,7 @@ class ActorCriticBeta(nn.Module):
     @property
     def action_mean(self):
         mode = self.a / (self.a + self.b + 1e-6) # type: ignore
-        # print("action mean: \n", mode[:5])
+        print("action mean: \n", mode[:5])
         mode_rescaled = mode * (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
         return mode_rescaled
     
@@ -193,8 +193,8 @@ class ActorCriticBeta(nn.Module):
         self.b = self.beta_activation(beta_latent) + 1.0 + self.eps
         # self.a = self.alpha_activation(self.alpha(latent)) + 1.0 + self.eps
         # self.b = self.beta_activation(self.beta(latent)) + 1.0 + self.eps
-        # print("alpha: \n", self.a[:5])
-        # print("beta: \n", self.b[:5])
+        print("alpha: \n", self.a[:5])
+        print("beta: \n", self.b[:5])
         # # clip alpha and beta to avoid numerical issues
         # self.a = torch.clamp(self.a, max=1e5)
         # self.b = torch.clamp(self.b, max=1e5)
@@ -204,7 +204,7 @@ class ActorCriticBeta(nn.Module):
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
         act = self.distribution.sample()
-        # print("sampled action: \n", act[:5])
+        print("sampled action: \n", act[:5])
         act_rescaled = act * (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
         return act_rescaled
 
