@@ -20,13 +20,13 @@ class RolloutStorage:
             self.values = None
             self.actions_log_prob = None
             self.action_mean = None
-            self.action_sigma = None
+            self.actions_distribution = None
             self.hidden_states = None
 
         def clear(self):
             self.__init__()
 
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, privileged_obs_shape, actions_shape, device="cpu"):
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, privileged_obs_shape, actions_shape, device="cpu", dist_size=2,):
         self.device = device
 
         self.obs_shape = obs_shape
@@ -51,7 +51,7 @@ class RolloutStorage:
         self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.mu = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
-        self.sigma = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
+        self.distributions_parameters = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, dist_size, device=self.device)
 
         self.num_transitions_per_env = num_transitions_per_env
         self.num_envs = num_envs
@@ -74,7 +74,7 @@ class RolloutStorage:
         self.values[self.step].copy_(transition.values)
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
         self.mu[self.step].copy_(transition.action_mean)
-        self.sigma[self.step].copy_(transition.action_sigma)
+        self.distributions_parameters[self.step].copy_(transition.actions_distribution)
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
 
@@ -144,7 +144,7 @@ class RolloutStorage:
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
         advantages = self.advantages.flatten(0, 1)
         old_mu = self.mu.flatten(0, 1)
-        old_sigma = self.sigma.flatten(0, 1)
+        old_distributions_parameters = self.distributions_parameters.flatten(0, 1)
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -160,8 +160,8 @@ class RolloutStorage:
                 old_actions_log_prob_batch = old_actions_log_prob[batch_idx]
                 advantages_batch = advantages[batch_idx]
                 old_mu_batch = old_mu[batch_idx]
-                old_sigma_batch = old_sigma[batch_idx]
-                yield obs_batch, critic_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
+                old_distributions_parameters_batch = old_distributions_parameters[batch_idx]
+                yield obs_batch, critic_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_distributions_parameters_batch, (
                     None,
                     None,
                 ), None
@@ -194,7 +194,7 @@ class RolloutStorage:
 
                 actions_batch = self.actions[:, start:stop]
                 old_mu_batch = self.mu[:, start:stop]
-                old_sigma_batch = self.sigma[:, start:stop]
+                old_distributions_parameters_batch = self.distributions_parameters[:, start:stop]
                 returns_batch = self.returns[:, start:stop]
                 advantages_batch = self.advantages[:, start:stop]
                 values_batch = self.values[:, start:stop]
@@ -220,7 +220,7 @@ class RolloutStorage:
                 hid_a_batch = hid_a_batch[0] if len(hid_a_batch) == 1 else hid_a_batch
                 hid_c_batch = hid_c_batch[0] if len(hid_c_batch) == 1 else hid_c_batch
 
-                yield obs_batch, critic_obs_batch, actions_batch, values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
+                yield obs_batch, critic_obs_batch, actions_batch, values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_distributions_parameters_batch, (
                     hid_a_batch,
                     hid_c_batch,
                 ), masks_batch

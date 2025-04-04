@@ -74,7 +74,7 @@ class PPO:
         self.transition.values = self.policy.evaluate(critic_obs).detach()
         self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.policy.action_mean.detach()
-        self.transition.action_sigma = self.policy.action_std.detach()
+        self.transition.actions_distribution = self.policy.actions_distribution.detach() # type: ignore
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
         self.transition.critic_observations = critic_obs
@@ -116,7 +116,7 @@ class PPO:
             returns_batch,
             old_actions_log_prob_batch,
             old_mu_batch,
-            old_sigma_batch,
+            old_actions_distributions_parameters,
             hid_states_batch,
             masks_batch,
         ) in generator:
@@ -125,20 +125,17 @@ class PPO:
             value_batch = self.policy.evaluate(
                 critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
             )
-            mu_batch = self.policy.action_mean
-            sigma_batch = self.policy.action_std
+            # mu_batch = self.policy.action_mean
+            # sigma_batch = self.policy.action_std
+            actions_distributions_batch = self.policy.actions_distribution
             entropy_batch = self.policy.entropy
 
             # KL
             if self.desired_kl is not None and self.schedule == "adaptive":
+                current_dist = self.policy.build_distribution(actions_distributions_batch)
+                old_dist = self.policy.build_distribution(old_actions_distributions_parameters)
                 with torch.inference_mode():
-                    kl = torch.sum(
-                        torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
-                        + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch))
-                        / (2.0 * torch.square(sigma_batch))
-                        - 0.5,
-                        axis=-1,
-                    ) # type: ignore
+                    kl = torch.distributions.kl.kl_divergence(current_dist, old_dist)
                     kl_mean = torch.mean(kl)
 
                     if kl_mean > self.desired_kl * 2.0:
