@@ -92,9 +92,34 @@ class Memory(torch.nn.Module):
             out, self.hidden_states = self.rnn(input.unsqueeze(0), self.hidden_states)
         return out
 
-    def reset(self, dones=None):
-        # When the RNN is an LSTM, self.hidden_states_a is a list with hidden_state and cell_state
-        if self.hidden_states is None:
-            return
-        for hidden_state in self.hidden_states:
-            hidden_state[..., dones == 1] = 0.0
+    def reset(self, dones=None, hidden_states=None):
+        if dones is None:  # reset all hidden states
+            if hidden_states is None:
+                self.hidden_states = None
+            else:
+                self.hidden_states = hidden_states
+        elif self.hidden_states is not None:  # reset hidden states of done environments
+            if hidden_states is None:
+                if isinstance(self.hidden_states, tuple):  # tuple in case of LSTM
+                    for hidden_state in self.hidden_states:
+                        hidden_state[..., dones == 1, :] = 0.0
+                else:
+                    self.hidden_states[..., dones == 1, :] = 0.0
+            else:
+                NotImplementedError(
+                    "Resetting hidden states of done environments with custom hidden states is not implemented"
+                )
+
+    def detach_hidden_states(self, dones=None):
+        if self.hidden_states is not None:
+            if dones is None:  # detach all hidden states
+                if isinstance(self.hidden_states, tuple):  # tuple in case of LSTM
+                    self.hidden_states = tuple(hidden_state.detach() for hidden_state in self.hidden_states)
+                else:
+                    self.hidden_states = self.hidden_states.detach()
+            else:  # detach hidden states of done environments
+                if isinstance(self.hidden_states, tuple):  # tuple in case of LSTM
+                    for hidden_state in self.hidden_states:
+                        hidden_state[..., dones == 1, :] = hidden_state[..., dones == 1, :].detach()
+                else:
+                    self.hidden_states[..., dones == 1, :] = self.hidden_states[..., dones == 1, :].detach()

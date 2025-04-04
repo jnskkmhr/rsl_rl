@@ -12,7 +12,7 @@ from collections import deque
 import rsl_rl
 from rsl_rl.algorithms import PPO
 from rsl_rl.env import VecEnv
-from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, EmpiricalNormalization
+from rsl_rl.modules import ActorCritic, ActorCriticBeta, ActorCriticRecurrent, EmpiricalNormalization
 from rsl_rl.utils import store_code_state
 
 
@@ -31,12 +31,12 @@ class OnPolicyRunner:
             num_critic_obs = extras["observations"]["critic"].shape[1]
         else:
             num_critic_obs = num_obs
-        actor_critic_class = eval(self.policy_cfg.pop("class_name"))  # ActorCritic
-        actor_critic: ActorCritic | ActorCriticRecurrent = actor_critic_class(
+        policy_class = eval(self.policy_cfg.pop("class_name"))  # ActorCritic
+        policy: ActorCritic | ActorCriticRecurrent = policy_class(
             num_obs, num_critic_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
         alg_class = eval(self.alg_cfg.pop("class_name"))  # PPO
-        self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
+        self.alg: PPO = alg_class(policy, device=self.device, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
         self.empirical_normalization = self.cfg["empirical_normalization"]
@@ -198,7 +198,7 @@ class OnPolicyRunner:
                 else:
                     self.writer.add_scalar("Episode/" + key, value, locs["it"])
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
-        mean_std = self.alg.actor_critic.std.mean()
+        mean_std = self.alg.policy.std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs["collection_time"] + locs["learn_time"]))
 
         self.writer.add_scalar("Loss/value_function", locs["mean_value_loss"], locs["it"])
@@ -261,7 +261,7 @@ class OnPolicyRunner:
 
     def save(self, path, infos=None):
         saved_dict = {
-            "model_state_dict": self.alg.actor_critic.state_dict(),
+            "model_state_dict": self.alg.policy.state_dict(),
             "optimizer_state_dict": self.alg.optimizer.state_dict(),
             "iter": self.current_learning_iteration,
             "infos": infos,
@@ -277,7 +277,7 @@ class OnPolicyRunner:
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
-        self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
+        self.alg.policy.load_state_dict(loaded_dict["model_state_dict"])
         if self.empirical_normalization:
             self.obs_normalizer.load_state_dict(loaded_dict["obs_norm_state_dict"])
             self.critic_obs_normalizer.load_state_dict(loaded_dict["critic_obs_norm_state_dict"])
@@ -289,22 +289,22 @@ class OnPolicyRunner:
     def get_inference_policy(self, device=None):
         self.eval_mode()  # switch to evaluation mode (dropout for example)
         if device is not None:
-            self.alg.actor_critic.to(device)
-        policy = self.alg.actor_critic.act_inference
+            self.alg.policy.to(device)
+        policy = self.alg.policy.act_inference
         if self.cfg["empirical_normalization"]:
             if device is not None:
                 self.obs_normalizer.to(device)
-            policy = lambda x: self.alg.actor_critic.act_inference(self.obs_normalizer(x))  # noqa: E731
+            policy = lambda x: self.alg.policy.act_inference(self.obs_normalizer(x))  # noqa: E731
         return policy
 
     def train_mode(self):
-        self.alg.actor_critic.train()
+        self.alg.policy.train()
         if self.empirical_normalization:
             self.obs_normalizer.train()
             self.critic_obs_normalizer.train()
 
     def eval_mode(self):
-        self.alg.actor_critic.eval()
+        self.alg.policy.eval()
         if self.empirical_normalization:
             self.obs_normalizer.eval()
             self.critic_obs_normalizer.eval()

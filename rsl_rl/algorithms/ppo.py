@@ -12,11 +12,11 @@ from rsl_rl.storage import RolloutStorage
 
 
 class PPO:
-    actor_critic: ActorCritic
+    policy: ActorCritic
 
     def __init__(
         self,
-        actor_critic,
+        policy,
         num_learning_epochs=1,
         num_mini_batches=1,
         clip_param=0.2,
@@ -38,10 +38,10 @@ class PPO:
         self.learning_rate = learning_rate
 
         # PPO components
-        self.actor_critic = actor_critic
-        self.actor_critic.to(self.device)
+        self.policy = policy
+        self.policy.to(self.device)
         self.storage = None  # initialized later
-        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
+        self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
         self.transition = RolloutStorage.Transition()
 
         # PPO parameters
@@ -61,20 +61,20 @@ class PPO:
         )
 
     def test_mode(self):
-        self.actor_critic.test()
+        self.policy.test()
 
     def train_mode(self):
-        self.actor_critic.train()
+        self.policy.train()
 
     def act(self, obs, critic_obs):
-        if self.actor_critic.is_recurrent:
-            self.transition.hidden_states = self.actor_critic.get_hidden_states()
+        if self.policy.is_recurrent:
+            self.transition.hidden_states = self.policy.get_hidden_states()
         # Compute the actions and values
-        self.transition.actions = self.actor_critic.act(obs).detach() # type: ignore
-        self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
-        self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
-        self.transition.action_mean = self.actor_critic.action_mean.detach()
-        self.transition.action_sigma = self.actor_critic.action_std.detach()
+        self.transition.actions = self.policy.act(obs).detach() # type: ignore
+        self.transition.values = self.policy.evaluate(critic_obs).detach()
+        self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
+        self.transition.action_mean = self.policy.action_mean.detach()
+        self.transition.action_sigma = self.policy.action_std.detach()
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
         self.transition.critic_observations = critic_obs
@@ -92,10 +92,10 @@ class PPO:
         # Record the transition
         self.storage.add_transitions(self.transition)
         self.transition.clear()
-        self.actor_critic.reset(dones)
+        self.policy.reset(dones)
 
     def compute_returns(self, last_critic_obs):
-        last_values = self.actor_critic.evaluate(last_critic_obs).detach()
+        last_values = self.policy.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
     def update(self):
@@ -103,7 +103,7 @@ class PPO:
         mean_surrogate_loss = 0
         mean_entropy = 0
         
-        if self.actor_critic.is_recurrent:
+        if self.policy.is_recurrent:
             generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
@@ -120,14 +120,14 @@ class PPO:
             hid_states_batch,
             masks_batch,
         ) in generator:
-            self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
-            actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
-            value_batch = self.actor_critic.evaluate(
+            self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
+            actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
+            value_batch = self.policy.evaluate(
                 critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
             )
-            mu_batch = self.actor_critic.action_mean
-            sigma_batch = self.actor_critic.action_std
-            entropy_batch = self.actor_critic.entropy
+            mu_batch = self.policy.action_mean
+            sigma_batch = self.policy.action_std
+            entropy_batch = self.policy.entropy
 
             # KL
             if self.desired_kl is not None and self.schedule == "adaptive":
@@ -173,7 +173,7 @@ class PPO:
             # Gradient step
             self.optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
             self.optimizer.step()
 
             mean_value_loss += value_loss.item()
