@@ -322,12 +322,6 @@ class PPO:
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
-            
-            # # print sarrogate loss log
-            # print("sampled log prob: \n", old_actions_log_prob_batch[:5])
-            # print("calculated log prob: \n", actions_log_prob_batch[:5])
-            # print("ratio: \n", ratio[:5])
-            # print("advantages: \n", advantages_batch[:5])
 
             # Value function loss
             if self.use_clipped_value_loss:
@@ -344,20 +338,17 @@ class PPO:
             
             # add nan
             if torch.isnan(loss):
-                print("surrogate_loss:", surrogate_loss.item())
-                print("calculated log prob: \n", actions_log_prob_batch[:5])
-                print("ratio: \n", ratio[:5])
-                print("advantages: \n", advantages_batch[:5])
+                print("surrogate_loss: \n", surrogate_loss.item())
+                print("calculated log prob: \n", actions_log_prob_batch[:2])
+                print("old action log batch: \n", old_actions_log_prob_batch[:2])
+                print("ratio: \n", ratio[:2])
+                print("advantages: \n", advantages_batch[:2])
                 
-                print("value loss:", value_loss.item())
+                print("value loss: \n", value_loss.item())
+                print("return batch: \n", returns_batch[:2])
+                print("value batch: ",value_batch[:2])
                 
-                print("entropy:", entropy_batch.mean().item())
-                
-                print("mu batch: ", mu_batch)
-                print("action distribution batch: ", actions_distributions_batch)
-                print("action log batch: ", actions_log_prob_batch)
-                print("old action log batch: ", old_actions_log_prob_batch)
-                print("value batch: ",value_batch)
+                print("entropy: \n", entropy_batch[:2])
                 raise ValueError("Loss is NaN. Check your implementation.")
 
             # Symmetry loss

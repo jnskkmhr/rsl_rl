@@ -100,6 +100,8 @@ class ActorCriticBeta(nn.Module):
         Beta.set_default_validate_args(False)
         
         self.eps = 1e-6
+        
+        self.print_log = True
 
     @staticmethod
     # not used at the moment
@@ -161,7 +163,8 @@ class ActorCriticBeta(nn.Module):
     @property
     def action_mean(self):
         mode = self.a / (self.a + self.b + 1e-6) # type: ignore
-        # print("action mean: \n", mode[:5])
+        if self.print_log:
+            print("action mean: \n", mode[:2])
         mode_rescaled = mode * (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
         return mode_rescaled
     
@@ -185,16 +188,13 @@ class ActorCriticBeta(nn.Module):
     def update_distribution(self, observations):
         # compute mean
         latent = self.actor(observations)
-        alpha_latent = self.alpha(latent)
-        beta_latent = self.beta(latent)
-        # print("alpha b4 clip: \n", alpha_latent[:5])
-        # print("beta b4 clip: \n", beta_latent[:5])
-        self.a = self.alpha_activation(alpha_latent) + 1.0 + self.eps
-        self.b = self.beta_activation(beta_latent) + 1.0 + self.eps
-        # self.a = self.alpha_activation(self.alpha(latent)) + 1.0 + self.eps
-        # self.b = self.beta_activation(self.beta(latent)) + 1.0 + self.eps
-        # print("alpha: \n", self.a[:5])
-        # print("beta: \n", self.b[:5])
+        self.a = self.alpha_activation(self.alpha(latent)) + 1.0 + self.eps
+        self.b = self.beta_activation(self.beta(latent)) + 1.0 + self.eps
+        if self.print_log:
+            print("==================================")
+            print("observation: \n", observations[:2])
+            print("alpha: \n", self.a[:2])
+            print("beta: \n", self.b[:2])
         # # clip alpha and beta to avoid numerical issues
         # self.a = torch.clamp(self.a, max=1e5)
         # self.b = torch.clamp(self.b, max=1e5)
@@ -204,7 +204,8 @@ class ActorCriticBeta(nn.Module):
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
         act = self.distribution.sample()
-        # print("sampled action: \n", act[:5])
+        if self.print_log:
+            print("sampled action: \n", act[:2])
         act_rescaled = act * (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
         return act_rescaled
 
@@ -225,6 +226,9 @@ class ActorCriticBeta(nn.Module):
 
     def evaluate(self, critic_observations, **kwargs):
         value = self.critic(critic_observations)
+        if self.print_log:
+            print("critic observation: \n", critic_observations[:2])
+            print("critic value: \n", value[:2])
         return value
 
     def load_state_dict(self, state_dict, strict=True):

@@ -112,6 +112,8 @@ class ActorCritic(nn.Module):
         self.distribution = None
         # disable args validation for speedup
         Normal.set_default_validate_args(False)
+        
+        self.print_log = True
     
     
     # weight initializers
@@ -166,6 +168,8 @@ class ActorCritic(nn.Module):
     @property
     def action_mean(self):
         mode = self.distribution.mean
+        if self.print_log:
+            print("action mean: \n", mode[:2])
         if self.clip_actions:
             mode = ((mode + 1) /2.0)* (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
         return mode
@@ -200,12 +204,21 @@ class ActorCritic(nn.Module):
             std = torch.exp(self.log_std).expand_as(mean)
         else:
             raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+        
+        if self.print_log:
+            print("==================================")
+            print("observation: \n", observations[:2])
+            print("mean: \n", mean[:2])
+            print("std: \n", std[:2])
+            
         # create distribution
         self.distribution = Normal(mean, std)
     
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
         act = self.distribution.sample()
+        if self.print_log:
+            print("sampled action: \n", act[:2])
         if self.clip_actions:
             # Apply tanh to clip the actions to [-1, 1]
             act = self.clipping_layer(act)
@@ -232,6 +245,9 @@ class ActorCritic(nn.Module):
 
     def evaluate(self, critic_observations, **kwargs):
         value = self.critic(critic_observations)
+        if self.print_log:
+            print("critic observation: \n", critic_observations[:2])
+            print("critic value: \n", value[:2])
         return value
     
     def load_state_dict(self, state_dict, strict=True):
