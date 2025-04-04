@@ -189,8 +189,8 @@ class PPO:
         
         # construct the loss dictionary
         loss_dict = {
-            "value_loss": mean_value_loss,
-            "surrogate_loss": mean_surrogate_loss,
+            "value_function": mean_value_loss,
+            "surrogate": mean_surrogate_loss,
             "entropy": mean_entropy,
         }
 
