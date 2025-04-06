@@ -198,9 +198,6 @@ class OnPolicyRunner:
                 else:
                     self.writer.add_scalar("Episode/" + key, value, locs["it"])
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
-        
-        mean_std = self.alg.policy.std.mean()
-        fps = int(self.num_steps_per_env * self.env.num_envs / (locs["collection_time"] + locs["learn_time"]))
 
         # -- Losses
         for key, value in locs["loss_dict"].items():
@@ -208,10 +205,15 @@ class OnPolicyRunner:
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
         
         # -- Policy
+        mean_std = self.alg.policy.action_std.mean()
+        distribution_params = self.alg.policy.actions_distribution
+        self.writer.add_scalar("Policy/param1", distribution_params[..., 0].mean().item(), locs["it"])
+        self.writer.add_scalar("Policy/param2", distribution_params[..., 1].mean().item(), locs["it"])
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
         
         # -- Performance
+        fps = int(self.num_steps_per_env * self.env.num_envs / (locs["collection_time"] + locs["learn_time"]))
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar("Perf/collection time", locs["collection_time"], locs["it"])
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])

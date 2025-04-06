@@ -102,6 +102,7 @@ class PPO:
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_entropy = 0
+        mean_bound_loss = 0
         
         if self.policy.is_recurrent:
             generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
@@ -125,7 +126,7 @@ class PPO:
             value_batch = self.policy.evaluate(
                 critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
             )
-            # mu_batch = self.policy.action_mean
+            mu_batch = self.policy.action_mean
             # sigma_batch = self.policy.action_std
             actions_distributions_batch = self.policy.actions_distribution
             entropy_batch = self.policy.entropy
@@ -164,8 +165,15 @@ class PPO:
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
+            
+            # Bound loss (see rl-games https://github.com/Denys88/rl_games/blob/b483bd62982f668e3fb4d457b418e56fae38ebf2/rl_games/algos_torch/a2c_continuous.py#L203-L211)
+            soft_bound = 1.1
+            bound_loss_coef = 1e-4
+            mu_loss_high = torch.square(torch.clamp_min(mu_batch - soft_bound, 0.0))
+            mu_loss_low = torch.square(torch.clamp_min(-mu_batch - soft_bound, 0.0))
+            b_loss = (mu_loss_high + mu_loss_low).sum(dim=1).mean()
 
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + bound_loss_coef* b_loss
 
             # Gradient step
             self.optimizer.zero_grad()
@@ -176,11 +184,13 @@ class PPO:
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy_batch.mean().item()
+            mean_bound_loss += b_loss.item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
         mean_entropy /= num_updates
+        mean_bound_loss /= num_updates
         
         self.storage.clear()
         
@@ -189,6 +199,7 @@ class PPO:
             "value_function": mean_value_loss,
             "surrogate": mean_surrogate_loss,
             "entropy": mean_entropy,
+            "bound_loss": mean_bound_loss,
         }
 
         return loss_dict
