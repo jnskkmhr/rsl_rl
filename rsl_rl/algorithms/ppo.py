@@ -280,7 +280,7 @@ class PPO:
             # we only keep the entropy of the first augmentation (the original one)
             mu_batch = self.policy.action_mean[:original_batch_size]
             actions_distributions_batch = self.policy.actions_distribution[:original_batch_size]
-            entropy_batch = self.policy.entropy[:original_batch_size]
+            entropy_batch = self.policy.entropy(actions_batch)[:original_batch_size]
 
             # KL
             if self.desired_kl is not None and self.schedule == "adaptive":

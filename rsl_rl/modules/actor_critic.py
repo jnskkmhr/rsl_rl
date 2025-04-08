@@ -113,7 +113,7 @@ class ActorCritic(nn.Module):
         # disable args validation for speedup
         Normal.set_default_validate_args(False)
         
-        self.print_log = True
+        self.print_log = False
     
     
     # weight initializers
@@ -182,10 +182,13 @@ class ActorCritic(nn.Module):
     def actions_distribution(self) -> torch.Tensor:
         # Mean and Std concatenated on an extra dimension
         return torch.stack([self.distribution.mean, self.distribution.stddev], dim=-1)
-
-    @property
-    def entropy(self):
-        return self.distribution.entropy().sum(dim=-1)
+    
+    def entropy(self, actions=None):
+        if self.clip_actions:
+            unscaled_actions = (actions - self.clip_actions_range[0]) / (self.clip_actions_range[1] - self.clip_actions_range[0]) * 2.0 - 1.0
+            return self.distribution.entropy().sum(dim=-1) + torch.log(1 - unscaled_actions**2 + self.eps).sum(dim=-1)
+        else:
+            return self.distribution.entropy().sum(dim=-1)
     
     def build_distribution(self, parameters):
         # build the distribution
