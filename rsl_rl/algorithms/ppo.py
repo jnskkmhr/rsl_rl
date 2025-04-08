@@ -121,6 +121,7 @@ class PPO:
             hid_states_batch,
             masks_batch,
         ) in generator:
+            print("update network")
             self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
             value_batch = self.policy.evaluate(
@@ -167,13 +168,36 @@ class PPO:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
             
             # Bound loss (see rl-games https://github.com/Denys88/rl_games/blob/b483bd62982f668e3fb4d457b418e56fae38ebf2/rl_games/algos_torch/a2c_continuous.py#L203-L211)
-            soft_bound = 1.1
-            bound_loss_coef = 1e-4
-            mu_loss_high = torch.square(torch.clamp_min(mu_batch - soft_bound, 0.0))
-            mu_loss_low = torch.square(torch.clamp_min(-mu_batch - soft_bound, 0.0))
-            b_loss = (mu_loss_high + mu_loss_low).sum(dim=1).mean()
+            # soft_bound = 1.1
+            # bound_loss_coef = 0.0
+            # mu_loss_high = torch.square(torch.clamp_min(mu_batch - soft_bound, 0.0))
+            # mu_loss_low = torch.square(torch.clamp_min(-mu_batch - soft_bound, 0.0))
+            # b_loss = (mu_loss_high + mu_loss_low).sum(dim=1).mean()
 
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + bound_loss_coef* b_loss
+            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() 
+            # loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + bound_loss_coef* b_loss
+
+
+            # monitor big loss
+            if loss > 1e10 or torch.isnan(loss):
+                print("loss big...")
+                print("observation batch: \n", obs_batch.squeeze())
+                
+                print("surrogate_loss: \n", surrogate_loss.item())
+                print("calculated log prob: \n", actions_log_prob_batch.squeeze())
+                print("old action log batch: \n", old_actions_log_prob_batch.squeeze())
+                print("ratio: \n", ratio.squeeze())
+                print("advantages: \n", advantages_batch.squeeze())
+                
+                print("value loss: \n", value_loss.item())
+                print("return batch: \n", returns_batch.squeeze())
+                print("value batch: ",value_batch.squeeze())
+                
+                print("entropy: \n", entropy_batch.squeeze())
+            
+            if torch.isnan(loss):
+                print("Loss is NaN. Check your implementation.")
+                raise ValueError("Loss blows up. Check your implementation.")
 
             # Gradient step
             self.optimizer.zero_grad()
@@ -184,7 +208,7 @@ class PPO:
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy_batch.mean().item()
-            mean_bound_loss += b_loss.item()
+            # mean_bound_loss += b_loss.item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates

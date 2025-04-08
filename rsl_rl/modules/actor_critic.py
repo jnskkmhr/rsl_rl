@@ -160,8 +160,8 @@ class ActorCritic(nn.Module):
     @property
     def action_mean(self):
         mode = self.distribution.mean
-        if self.print_log:
-            print("action mean: \n", mode[:2])
+        # if self.print_log:
+        #     print("action mean: \n", mode[:2])
         if self.clip_actions:
             mode = ((mode + 1) /2.0)* (self.clip_actions_range[1] - self.clip_actions_range[0]) + self.clip_actions_range[0]
         return mode
@@ -200,10 +200,34 @@ class ActorCritic(nn.Module):
             raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
         
         if self.print_log:
+            torch.set_printoptions(profile="full")
             print("==================================")
             print("observation: \n", observations[:2])
             print("mean: \n", mean[:2])
             print("std: \n", std[:2])
+        
+        if torch.isnan(mean).any() or torch.isnan(std).any():
+            print("mean or std nan...")
+            torch.set_printoptions(profile="full") # for debugging purposes
+            print("observation: ")
+            print(observations[:2])
+
+            # print weight of network 
+            for layer in self.actor:
+                if isinstance(layer, nn.Linear):
+                    print(f"Layer: {layer}")
+                    if layer.weight is not None:
+                        print("weight: ", layer.weight)
+                    if layer.bias is not None:
+                        print("bias: ", layer.bias)
+            for layer in self.critic:
+                if isinstance(layer, nn.Linear):
+                    print(f"Layer: {layer}")
+                    if layer.weight is not None:
+                        print("weight: ", layer.weight)
+                    if layer.bias is not None:
+                        print("bias: ", layer.bias)
+            raise ValueError("mean or std produced NaN values during distribution update.")
             
         # create distribution
         self.distribution = Normal(mean, std)

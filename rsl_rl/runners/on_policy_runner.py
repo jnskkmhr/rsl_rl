@@ -110,9 +110,23 @@ class OnPolicyRunner:
             start = time.time()
             # Rollout
             with torch.inference_mode():
+                print("======")
+                print("rollout")
+                torch.set_printoptions(profile="full")
                 for i in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, critic_obs)
+                    # if (torch.isnan(actions).any() or torch.isinf(actions).any()) or (actions > 1e10).any():
+                    #     print("actions values are too high")
+                    #     print("obs: \n", obs)
+                    #     print("actions: \n", actions)
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device)) # type: ignore
+
+                    # monitor big reward
+                    mask = torch.logical_or((rewards > 1e3), torch.logical_or(torch.isinf(rewards), torch.isnan(rewards)))
+                    if mask.any():
+                        print("rewards values are too high")
+                        print("rewards: \n", rewards)
+
                     # move to the right device
                     obs, critic_obs, rewards, dones = (
                         obs.to(self.device),
