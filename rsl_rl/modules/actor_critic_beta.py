@@ -29,7 +29,8 @@ class ActorCriticBeta(nn.Module):
         init_last_layer_zero: bool = False,
         clip_actions: bool = True,
         clip_actions_range: tuple = (-1.0, 1.0),
-        softplus_beta: list[float] = [0.1, 0.1],
+        softplus_beta: list[float] = [1.0, 1.0],
+        print_log: bool = False,
         **kwargs,
     ):
         if kwargs:

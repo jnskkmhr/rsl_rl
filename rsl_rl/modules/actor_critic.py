@@ -13,11 +13,6 @@ from torch.distributions import Normal
 
 from rsl_rl.utils import resolve_nn_activation
 
-STD_MIN = math.exp(-20)
-STD_MAX = math.exp(0.1)
-LOG_STD_MAX = 0.1
-LOG_STD_MIN = -20
-
 class ActorCritic(nn.Module):
     is_recurrent = False
 
@@ -35,6 +30,7 @@ class ActorCritic(nn.Module):
         init_last_layer_zero: bool = False,
         clip_actions=False,
         clip_actions_range: tuple = (-1.0, 1.0),
+        print_log: bool = False,
         **kwargs,
     ):
         if kwargs:
@@ -113,7 +109,7 @@ class ActorCritic(nn.Module):
         # disable args validation for speedup
         Normal.set_default_validate_args(False)
         
-        self.print_log = False
+        self.print_log = print_log
     
     
     # weight initializers

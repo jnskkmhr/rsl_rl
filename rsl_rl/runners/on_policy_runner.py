@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import gc
 import math
 import statistics
 import time
@@ -274,6 +275,7 @@ class OnPolicyRunner:
                 # Save model
                 if it % self.save_interval == 0:
                     self.save(os.path.join(self.log_dir, "model", f"model_{it}.pt"))
+                    gc.collect() # Needed for Isaac4.5/IsaacLab2.0
 
             # Clear episode infos
             ep_infos.clear()
