@@ -14,3 +14,7 @@ docs/_build/
 
 # vs code
 .vscode
+
+logs
+wandb
+outputs

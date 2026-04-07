@@ -62,6 +62,9 @@ class RolloutStorage:
             self.hidden_states: tuple[HiddenState, HiddenState] = (None, None)
             """Hidden states for recurrent networks, e.g., (actor, critic)."""
 
+            self.student_hidden_state: HiddenState = None
+            """Hidden state for a student recurrent model (optional)."""
+
             # For encoder networks
             self.encoder_state: torch.Tensor | None = None
             """Encoder output for encoder networks."""
@@ -87,6 +90,7 @@ class RolloutStorage:
             old_actions_log_prob: torch.Tensor | None = None,
             old_distribution_params: tuple[torch.Tensor, ...] | None = None,
             hidden_states: tuple[HiddenState, HiddenState] = (None, None),
+            student_hidden_state: HiddenState = None,
             masks: torch.Tensor | None = None,
             privileged_actions: torch.Tensor | None = None,
             dones: torch.Tensor | None = None,
@@ -129,6 +133,9 @@ class RolloutStorage:
             # For recurrent networks
             self.hidden_states: tuple[HiddenState, HiddenState] = hidden_states
             """Batch of hidden states for recurrent networks (RL recurrent only)."""
+
+            self.student_hidden_state: HiddenState = student_hidden_state
+            """Batch of hidden states for student recurrent model (optional)."""
 
             self.masks: torch.Tensor | None = masks
             """Batch of trajectory masks for recurrent networks (RL recurrent only)."""
@@ -182,6 +189,7 @@ class RolloutStorage:
         # For recurrent networks
         self.saved_hidden_state_a = None
         self.saved_hidden_state_c = None
+        self.saved_student_hidden_state = None
 
         # Counter for the number of transitions stored
         self.step = 0
@@ -230,6 +238,7 @@ class RolloutStorage:
 
         # For RNN networks
         self._save_hidden_states(transition.hidden_states)
+        self._save_student_hidden_state(transition.student_hidden_state)
 
         # Increment the counter
         self.step += 1
@@ -351,6 +360,22 @@ class RolloutStorage:
                 else:
                     hidden_state_c_batch = None
 
+                if self.saved_student_hidden_state is not None:
+                    student_hidden_state_batch = [
+                        saved_hidden_state
+                        .permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
+                        .transpose(1, 0)
+                        .contiguous()
+                        for saved_hidden_state in self.saved_student_hidden_state
+                    ]
+                    student_hidden_state_batch = (
+                        student_hidden_state_batch[0]
+                        if len(student_hidden_state_batch) == 1
+                        else tuple(student_hidden_state_batch)
+                    )
+                else:
+                    student_hidden_state_batch = None
+
                 # Yield the mini-batch
                 yield RolloutStorage.Batch(
                     observations=padded_obs_trajectories[:, first_traj:last_traj],  # type: ignore
@@ -361,6 +386,7 @@ class RolloutStorage:
                     old_actions_log_prob=self.actions_log_prob[:, start:stop],
                     old_distribution_params=tuple(p[:, start:stop] for p in self.distribution_params),  # type: ignore
                     hidden_states=(hidden_state_a_batch, hidden_state_c_batch),  # type: ignore
+                    student_hidden_state=student_hidden_state_batch,
                     masks=trajectory_masks[:, first_traj:last_traj],
                     encoder_state=self.encoder_state[:, start:stop] if self.encoder_state is not None else None,
                 )
@@ -394,3 +420,18 @@ class RolloutStorage:
         if hidden_states[1] is not None:
             for i in range(len(hidden_state_c)):
                 self.saved_hidden_state_c[i][self.step].copy_(hidden_state_c[i])  # type: ignore
+
+    def _save_student_hidden_state(self, student_hidden_state: HiddenState) -> None:
+        """Save optional student recurrent hidden states to the rollout storage."""
+        if student_hidden_state is None:
+            return
+
+        state_tuple = student_hidden_state if isinstance(student_hidden_state, tuple) else (student_hidden_state,)
+
+        if self.saved_student_hidden_state is None:
+            self.saved_student_hidden_state = [
+                torch.zeros(self.observations.shape[0], *state.shape, device=self.device) for state in state_tuple
+            ]
+
+        for i in range(len(state_tuple)):
+            self.saved_student_hidden_state[i][self.step].copy_(state_tuple[i])
