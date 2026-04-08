@@ -317,7 +317,11 @@ class L2T:
             imitation_loss = nn.functional.mse_loss(student_actions, batch.actions.detach())  # type: ignore[arg-type]
 
             encoder_reconstruction_loss = torch.zeros((), device=self.device)
-            if self.student.has_encoder and batch.privileged_encoder_state is not None:
+            if (
+                self.student_encoder_reconstruction_coef > 0.0
+                and self.student.has_encoder
+                and batch.privileged_encoder_state is not None
+            ):
                 student_encoder_state = self.student.get_encoder_state()
                 encoder_reconstruction_loss = nn.functional.mse_loss(
                     student_encoder_state, batch.privileged_encoder_state
