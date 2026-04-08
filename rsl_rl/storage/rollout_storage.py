@@ -282,6 +282,9 @@ class RolloutStorage:
         advantages = self.advantages.flatten(0, 1)
         old_distribution_params = tuple(p.flatten(0, 1) for p in self.distribution_params)  # type: ignore
         encoder_state = self.encoder_state.flatten(0, 1) if self.encoder_state is not None else None
+        privileged_encoder_state = (
+            self.privileged_encoder_state.flatten(0, 1) if self.privileged_encoder_state is not None else None
+        )
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -299,7 +302,10 @@ class RolloutStorage:
                     returns=returns[batch_idx],
                     old_actions_log_prob=old_actions_log_prob[batch_idx],
                     old_distribution_params=tuple(p[batch_idx] for p in old_distribution_params),
-                    encoder_state=encoder_state[batch_idx] if encoder_state is not None else None,
+                    encoder_state=encoder_state[batch_idx].clone() if encoder_state is not None else None,
+                    privileged_encoder_state=(
+                        privileged_encoder_state[batch_idx].clone() if privileged_encoder_state is not None else None
+                    ),
                 )
 
     # For reinforcement learning with recurrent networks
@@ -388,7 +394,14 @@ class RolloutStorage:
                     hidden_states=(hidden_state_a_batch, hidden_state_c_batch),  # type: ignore
                     student_hidden_state=student_hidden_state_batch,
                     masks=trajectory_masks[:, first_traj:last_traj],
-                    encoder_state=self.encoder_state[:, start:stop] if self.encoder_state is not None else None,
+                    encoder_state=(
+                        self.encoder_state[:, start:stop].clone() if self.encoder_state is not None else None
+                    ),
+                    privileged_encoder_state=(
+                        self.privileged_encoder_state[:, start:stop].clone()
+                        if self.privileged_encoder_state is not None
+                        else None
+                    ),
                 )
 
                 first_traj = last_traj

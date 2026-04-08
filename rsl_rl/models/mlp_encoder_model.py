@@ -19,10 +19,10 @@ from rsl_rl.utils import unpad_trajectories
 class MLPEncoderModel(MLPModel):
     """MLP-based encoder neural model.
 
-    This model uses a recurrent neural network (RNN) to process 1D observation groups before passing the resulting
-    latent to an MLP. Available RNN types are "lstm" and "gru". Observations can be normalized before being passed to
-    the RNN. The output of the model can be either deterministic or stochastic, in which case a distribution module is
-    used to sample the outputs.
+    This model uses a separate MLP encoder to process a dedicated observation group before concatenating the resulting
+    latent with the main observations and passing both through a shared MLP head. Observations can be normalized before
+    being passed to the encoder. The output of the model can be either deterministic or stochastic, in which case a
+    distribution module is used to sample the outputs.
     """
 
     is_recurrent: bool = False
@@ -46,7 +46,7 @@ class MLPEncoderModel(MLPModel):
         encoder_activation: str = "elu",
         encoder_obs_normalization: bool = False,
     ) -> None:
-        """Initialize the RNN-based model.
+        """Initialize the MLP encoder model.
 
         Args:
             obs: Observation Dictionary.
@@ -112,7 +112,10 @@ class MLPEncoderModel(MLPModel):
         """
         # If observations are padded for recurrent training but the model is non-recurrent, unpad the observations
         obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
-        # Get MLP input latent
+        # TODO: unpad encoder_state
+        # encoder_state = (
+        #     unpad_trajectories(encoder_state, masks) if masks is not None and not self.is_recurrent else encoder_state
+        # )
         obs_latent = super().get_latent(obs, masks, hidden_state)
         latent = torch.cat([obs_latent, encoder_state], dim=-1) if encoder_state is not None else obs_latent
         # MLP forward pass

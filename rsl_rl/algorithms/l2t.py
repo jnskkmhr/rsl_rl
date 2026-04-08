@@ -59,6 +59,7 @@ class L2T:
         value_loss_coef: float = 1.0,
         entropy_coef: float = 0.01,
         student_imitation_coef: float = 1.0,
+        student_encoder_reconstruction_coef: float = 1.0,
         student_asymmetry_coef: float = 0.0,
         student_entropy_coef: float = 0.0,
         learning_rate: float = 0.001,
@@ -110,6 +111,7 @@ class L2T:
         self.value_loss_coef = value_loss_coef
         self.entropy_coef = entropy_coef
         self.student_imitation_coef = student_imitation_coef
+        self.student_encoder_reconstruction_coef = student_encoder_reconstruction_coef
         self.student_asymmetry_coef = student_asymmetry_coef
         self.student_entropy_coef = student_entropy_coef
         self.gamma = gamma
@@ -124,9 +126,7 @@ class L2T:
         self.mixture_schedule = kwargs.get("mixture_schedule", "constant")
         self.max_iterations = kwargs.get("max_iterations", None)
         if self.mixture_schedule not in {"constant", "linear"}:
-            raise ValueError(
-                f"Unknown mixture schedule: {self.mixture_schedule}. Supported: 'constant', 'linear'."
-            )
+            raise ValueError(f"Unknown mixture schedule: {self.mixture_schedule}. Supported: 'constant', 'linear'.")
         self.last_student_mix_ratio = 0.0
         self.last_effective_mixture_coeff = 0.0
         self.num_updates = 0
@@ -144,9 +144,11 @@ class L2T:
 
         # Run a student forward pass to populate distribution statistics and recurrent state.
         student_actions = self.student(obs, stochastic_output=True)
+        student_encoder_state = self.student.get_encoder_state()
 
         teacher_actions = self.teacher(obs, stochastic_output=True)
         values = self.critic(obs)
+        teacher_encoder_state = self.teacher.get_encoder_state()
 
         effective_mixture_coeff = self._get_effective_mixture_coeff()
         self.last_effective_mixture_coeff = effective_mixture_coeff
@@ -166,6 +168,10 @@ class L2T:
         self.transition.values = values.detach()
         self.transition.actions_log_prob = self.teacher.get_output_log_prob(actions).detach()  # type: ignore[arg-type]
         self.transition.distribution_params = tuple(p.detach() for p in self.teacher.output_distribution_params)
+        self.transition.encoder_state = student_encoder_state.detach() if student_encoder_state is not None else None
+        self.transition.privileged_encoder_state = (
+            teacher_encoder_state.detach() if teacher_encoder_state is not None else None
+        )
 
         # Record observations before env.step()
         self.transition.observations = obs
@@ -221,6 +227,7 @@ class L2T:
         mean_teacher_entropy = 0.0
         mean_student_loss = 0.0
         mean_student_imitation_loss = 0.0
+        mean_student_encoder_reconstruction_loss = 0.0
         mean_student_asymmetry_loss = 0.0
 
         recurrent = self.teacher.is_recurrent or self.critic.is_recurrent or self.student.is_recurrent
@@ -309,6 +316,13 @@ class L2T:
             )
             imitation_loss = nn.functional.mse_loss(student_actions, batch.actions.detach())  # type: ignore[arg-type]
 
+            encoder_reconstruction_loss = torch.zeros((), device=self.device)
+            if self.student.has_encoder and batch.privileged_encoder_state is not None:
+                student_encoder_state = self.student.get_encoder_state()
+                encoder_reconstruction_loss = nn.functional.mse_loss(
+                    student_encoder_state, batch.privileged_encoder_state
+                )
+
             student_asymmetry_loss = torch.zeros((), device=self.device)
             if self.student_asymmetry_coef > 0.0:
                 student_log_prob = self.student.get_output_log_prob(batch.actions.detach())  # type: ignore[arg-type]
@@ -321,6 +335,7 @@ class L2T:
             student_entropy = self.student.output_entropy.mean()
             student_loss = (
                 self.student_imitation_coef * imitation_loss
+                + self.student_encoder_reconstruction_coef * encoder_reconstruction_loss
                 + self.student_asymmetry_coef * student_asymmetry_loss
                 - self.student_entropy_coef * student_entropy
             )
@@ -348,6 +363,7 @@ class L2T:
             mean_teacher_entropy += entropy.mean().item()
             mean_student_loss += student_loss.item()
             mean_student_imitation_loss += imitation_loss.item()
+            mean_student_encoder_reconstruction_loss += encoder_reconstruction_loss.item()
             mean_student_asymmetry_loss += student_asymmetry_loss.item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
@@ -356,6 +372,7 @@ class L2T:
         mean_teacher_entropy /= num_updates
         mean_student_loss /= num_updates
         mean_student_imitation_loss /= num_updates
+        mean_student_encoder_reconstruction_loss /= num_updates
         mean_student_asymmetry_loss /= num_updates
 
         self.storage.clear()
@@ -367,6 +384,7 @@ class L2T:
             "entropy": mean_teacher_entropy,
             "student": mean_student_loss,
             "student_imitation": mean_student_imitation_loss,
+            "student_encoder_reconstruction": mean_student_encoder_reconstruction_loss,
             "student_asymmetry": mean_student_asymmetry_loss,
             "student_mix_ratio": self.last_student_mix_ratio,
             "student_mixture_coeff": self.last_effective_mixture_coeff,
