@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from rsl_rl.algorithms import Distillation
+from rsl_rl.models import MLPModel
 from rsl_rl.runners import OnPolicyRunner
 
 
@@ -23,3 +24,8 @@ class DistillationRunner(OnPolicyRunner):
             raise ValueError("Teacher model parameters not loaded. Please load a teacher model to distill.")
 
         super().learn(num_learning_iterations, init_at_random_ep_len)
+
+    def get_inference_teacher(self, device: str | None = None) -> MLPModel:
+        """Return the policy on the requested device for inference."""
+        self.alg.eval_mode()  # Switch to evaluation mode (e.g. for dropout)
+        return self.alg.get_teacher().to(device)  # type: ignore

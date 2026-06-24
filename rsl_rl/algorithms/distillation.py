@@ -60,6 +60,8 @@ class Distillation:
         # Distillation components
         self.student = student.to(self.device)
         self.teacher = teacher.to(self.device)
+        for param in self.teacher.parameters():
+            param.requires_grad_(False)
 
         # Handles to the uncompiled modules for state_dict operations and export. If compilation is disabled, these
         # simply alias ``self.student`` / ``self.teacher``.
@@ -97,6 +99,10 @@ class Distillation:
         # Compute the actions
         self.transition.actions = self.student(obs, stochastic_output=True).detach()
         self.transition.privileged_actions = self.teacher(obs).detach()
+        encoder_state = self.student.get_encoder_state()
+        self.transition.encoder_state = encoder_state.detach() if encoder_state is not None else None
+        encoder_state = self.teacher.get_encoder_state()
+        self.transition.privileged_encoder_state = encoder_state.detach() if encoder_state is not None else None
         # Record the observations
         self.transition.observations = obs
         return self.transition.actions  # type: ignore
@@ -125,6 +131,8 @@ class Distillation:
         """Run optimization epochs over stored batches and return mean losses."""
         self.num_updates += 1
         mean_behavior_loss = 0
+        mean_encoder_reconstruction_loss = 0
+        mean_decoder_loss = 0
         loss = 0
         cnt = 0
 
@@ -139,9 +147,25 @@ class Distillation:
                 # Behavior cloning loss
                 behavior_loss = self.loss_fn(actions, batch.privileged_actions)
 
+                # Encoder reconstruction loss
+                encoder_reconstruction_loss = 0
+                if batch.encoder_state is not None and batch.privileged_encoder_state is not None:
+                    encoder_state = self.student.get_encoder_state()
+                    encoder_reconstruction_loss = self.loss_fn(encoder_state, batch.privileged_encoder_state)
+
+                # Decoder matching loss
+                decoder_loss = 0
+                if batch.encoder_state is not None and batch.privileged_encoder_state is not None:
+                    with torch.no_grad():
+                        teacher_decoder_output = self.teacher.get_decoder_inference(batch.privileged_encoder_state)
+                    student_decoder_output = self.teacher.get_decoder_inference(encoder_state)
+                    decoder_loss = self.loss_fn(student_decoder_output, teacher_decoder_output)
+
                 # Total loss
-                loss = loss + behavior_loss
+                loss = loss + behavior_loss + encoder_reconstruction_loss + decoder_loss
                 mean_behavior_loss += behavior_loss.item()
+                mean_encoder_reconstruction_loss += encoder_reconstruction_loss.item()
+                mean_decoder_loss += decoder_loss.item()
                 cnt += 1
 
                 # Gradient step
@@ -162,12 +186,18 @@ class Distillation:
                 self.student.detach_hidden_state(batch.dones.view(-1))
 
         mean_behavior_loss /= cnt
+        mean_encoder_reconstruction_loss /= cnt
+        mean_decoder_loss /= cnt
         self.storage.clear()
         self.last_hidden_states = (self.student.get_hidden_state(), self.teacher.get_hidden_state())
         self.student.detach_hidden_state()
 
         # Construct the loss dictionary
-        loss_dict = {"behavior": mean_behavior_loss}
+        loss_dict = {
+            "behavior": mean_behavior_loss,
+            "encoder_reconstruction": mean_encoder_reconstruction_loss,
+            "decoder_reconstruction": mean_decoder_loss,
+        }
 
         return loss_dict
 
@@ -230,6 +260,10 @@ class Distillation:
         """
         self.student = compile_model(self._raw_student, mode)  # type: ignore
         self.teacher = compile_model(self._raw_teacher, mode)  # type: ignore
+
+    def get_teacher(self) -> MLPModel:
+        """Get the teacher model."""
+        return self.teacher
 
     @staticmethod
     def construct_algorithm(obs: TensorDict, env: VecEnv, cfg: dict, device: str) -> Distillation:

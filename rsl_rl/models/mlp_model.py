@@ -26,6 +26,8 @@ class MLPModel(nn.Module):
 
     is_recurrent: bool = False
     """Whether the model contains a recurrent module."""
+    has_encoder: bool = False
+    """Whether the model contains an encoder."""
 
     def __init__(
         self,
@@ -123,6 +125,10 @@ class MLPModel(nn.Module):
 
     def get_hidden_state(self) -> HiddenState:
         """Return the recurrent hidden state (``None`` for MLP)."""
+        return None
+
+    def get_encoder_state(self) -> torch.Tensor | None:
+        """Return the encoder output (``None`` for MLP)."""
         return None
 
     def detach_hidden_state(self, dones: torch.Tensor | None = None) -> None:

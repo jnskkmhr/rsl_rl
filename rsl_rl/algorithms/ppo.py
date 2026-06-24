@@ -121,6 +121,9 @@ class PPO:
         self.transition.values = self.critic(obs).detach()
         self.transition.actions_log_prob = self.actor.get_output_log_prob(self.transition.actions).detach()  # type: ignore
         self.transition.distribution_params = tuple(p.detach() for p in self.actor.output_distribution_params)
+        # Compute latent
+        encoder_state = self.actor.get_encoder_state()
+        self.transition.encoder_state = encoder_state.detach() if encoder_state is not None else None
         # Record observations before env.step()
         self.transition.observations = obs
         return self.transition.actions  # type: ignore
@@ -217,13 +220,22 @@ class PPO:
                 self.symmetry.augment_batch(batch, original_batch_size)
 
             # Recompute actions log prob and entropy for current batch of transitions
-            # Note: We need to do this because we updated the policy with new parameters
-            self.actor(
-                batch.observations,
-                masks=batch.masks,
-                hidden_state=batch.hidden_states[0],
-                stochastic_output=True,
-            )
+            # Note: We need to do this because we updated the policy with the new parameters
+            if self.actor.has_encoder and hasattr(self.actor, "forward_encoder"):
+                self.actor.forward_encoder(
+                    batch.observations,
+                    encoder_state=batch.encoder_state,
+                    masks=batch.masks,
+                    hidden_state=batch.hidden_states[0],
+                    stochastic_output=True,
+                )
+            else:
+                self.actor(
+                    batch.observations,
+                    masks=batch.masks,
+                    hidden_state=batch.hidden_states[0],
+                    stochastic_output=True,
+                )
             actions_log_prob = self.actor.get_output_log_prob(batch.actions)  # type: ignore
             values = self.critic(batch.observations, masks=batch.masks, hidden_state=batch.hidden_states[1])
             # Note: We only keep the following tensors for the original samples in case of symmetry augmentation

@@ -178,6 +178,22 @@ class OnPolicyRunner:
         traced_model = torch.jit.script(jit_model)
         traced_model.save(save_path)
 
+        # export decoder if present
+        if hasattr(self.alg.get_policy(), "as_jit_decoder"):
+            decoder_jit_model = self.alg.get_policy().as_jit_decoder()
+            decoder_jit_model.to("cpu")
+            decoder_save_path = os.path.join(path, "decoder.pt")
+            traced_decoder = torch.jit.script(decoder_jit_model)
+            traced_decoder.save(decoder_save_path)
+        
+        # export teacher decoder if present
+        if hasattr(self.alg, "get_teacher") and hasattr(self.alg.get_teacher(), "as_jit_decoder"): # type: ignore
+            decoder_jit_model = self.alg.get_teacher().as_jit_decoder() # type: ignore
+            decoder_jit_model.to("cpu")
+            decoder_save_path = os.path.join(path, "teacher_decoder.pt")
+            traced_decoder = torch.jit.script(decoder_jit_model)
+            traced_decoder.save(decoder_save_path)
+
     def export_policy_to_onnx(self, path: str, filename: str = "policy.onnx", verbose: bool = False) -> None:
         """Export the model into an ONNX file."""
         onnx_model = self.alg.get_policy().as_onnx(verbose=verbose)
@@ -199,6 +215,40 @@ class OnPolicyRunner:
             input_names=onnx_model.input_names,  # type: ignore
             output_names=onnx_model.output_names,  # type: ignore
         )
+
+        # Export decoder if present
+        if hasattr(self.alg.get_policy(), "as_onnx_decoder"):
+            decoder_onnx_model = self.alg.get_policy().as_onnx_decoder(verbose=verbose)
+            decoder_onnx_model.to("cpu")
+            decoder_onnx_model.eval()
+            decoder_save_path = os.path.join(path, "decoder.onnx")
+            torch.onnx.export(
+                decoder_onnx_model,
+                decoder_onnx_model.get_dummy_inputs(),  # type: ignore
+                decoder_save_path,
+                export_params=True,
+                opset_version=18,
+                verbose=verbose,
+                input_names=decoder_onnx_model.input_names,  # type: ignore
+                output_names=decoder_onnx_model.output_names,  # type: ignore
+            )
+        
+        # Export teacher decoder if present
+        if hasattr(self.alg, "get_teacher") and hasattr(self.alg.get_teacher(), "as_onnx_decoder"): # type: ignore
+            decoder_onnx_model = self.alg.get_teacher().as_onnx_decoder(verbose=verbose) # type: ignore
+            decoder_onnx_model.to("cpu")
+            decoder_onnx_model.eval()
+            decoder_save_path = os.path.join(path, "teacher_decoder.onnx")
+            torch.onnx.export(
+                decoder_onnx_model,
+                decoder_onnx_model.get_dummy_inputs(),  # type: ignore
+                decoder_save_path,
+                export_params=True,
+                opset_version=18,
+                verbose=verbose,
+                input_names=decoder_onnx_model.input_names,  # type: ignore
+                output_names=decoder_onnx_model.output_names,  # type: ignore
+            )
 
     def add_git_repo_to_log(self, repo_file_path: str) -> None:
         """Register a repository path whose git status should be logged."""

@@ -55,10 +55,16 @@ class RolloutStorage:
             # For distillation
             self.privileged_actions: torch.Tensor | None = None
             """Privileged (teacher) actions (distillation only)."""
+            self.privileged_encoder_state: torch.Tensor | None = None
+            """Privileged (teacher) encoder output (distillation only)."""
 
             # For recurrent networks
             self.hidden_states: tuple[HiddenState, HiddenState] = (None, None)
             """Hidden states for recurrent networks, e.g., (actor, critic)."""
+
+            # For encoder networks
+            self.encoder_state: torch.Tensor | None = None
+            """Encoder output for encoder networks."""
 
         def clear(self) -> None:
             """Reset all transition fields to None."""
@@ -84,6 +90,8 @@ class RolloutStorage:
             masks: torch.Tensor | None = None,
             privileged_actions: torch.Tensor | None = None,
             dones: torch.Tensor | None = None,
+            encoder_state: torch.Tensor | None = None,
+            privileged_encoder_state: torch.Tensor | None = None,
         ) -> None:
             """Initialize a batch container over rollout data."""
             self.observations: TensorDict | None = observations
@@ -115,12 +123,19 @@ class RolloutStorage:
             self.dones: torch.Tensor | None = dones
             """Batch of done flags (distillation only)."""
 
+            self.privileged_encoder_state: torch.Tensor | None = privileged_encoder_state
+            """Batch of privileged (teacher) encoder outputs (distillation only)."""
+
             # For recurrent networks
             self.hidden_states: tuple[HiddenState, HiddenState] = hidden_states
             """Batch of hidden states for recurrent networks (RL recurrent only)."""
 
             self.masks: torch.Tensor | None = masks
             """Batch of trajectory masks for recurrent networks (RL recurrent only)."""
+
+            # For encoder networks
+            self.encoder_state: torch.Tensor | None = encoder_state
+            """Batch of encoder outputs for encoder networks."""
 
     def __init__(
         self,
@@ -152,16 +167,20 @@ class RolloutStorage:
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
 
         # For distillation
-        if training_type == "distillation":
+        if training_type in ("distillation", "ppo_distillation"):
             self.privileged_actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
 
         # For reinforcement learning
-        if training_type == "rl":
+        if training_type in ("rl", "ppo_distillation"):
             self.values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.distribution_params: tuple[torch.Tensor, ...] | None = None  # Lazily initialized on first transition
             self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+
+        # For encoder networks (lazily initialized on first transition)
+        self.encoder_state: torch.Tensor | None = None
+        self.privileged_encoder_state: torch.Tensor | None = None
 
         # For recurrent networks
         self.saved_hidden_state_a = None
@@ -183,11 +202,11 @@ class RolloutStorage:
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
 
         # For distillation
-        if self.training_type == "distillation":
+        if self.training_type in ("distillation", "ppo_distillation"):
             self.privileged_actions[self.step].copy_(transition.privileged_actions)  # type: ignore
 
         # For reinforcement learning
-        if self.training_type == "rl":
+        if self.training_type in ("rl", "ppo_distillation"):
             self.values[self.step].copy_(transition.values)  # type: ignore
             self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
             if self.distribution_params is None:  # Initialize the distribution parameters
@@ -197,6 +216,20 @@ class RolloutStorage:
                 )
             for i, p in enumerate(transition.distribution_params):  # type: ignore
                 self.distribution_params[i][self.step].copy_(p)
+
+        # For encoder networks
+        if transition.encoder_state is not None:
+            if self.encoder_state is None:
+                self.encoder_state = torch.zeros(
+                    self.num_transitions_per_env, *transition.encoder_state.shape, device=self.device
+                )
+            self.encoder_state[self.step].copy_(transition.encoder_state)
+        if transition.privileged_encoder_state is not None:
+            if self.privileged_encoder_state is None:
+                self.privileged_encoder_state = torch.zeros(
+                    self.num_transitions_per_env, *transition.privileged_encoder_state.shape, device=self.device
+                )
+            self.privileged_encoder_state[self.step].copy_(transition.privileged_encoder_state)
 
         # For RNN networks
         self._save_hidden_states(transition.hidden_states)
@@ -219,12 +252,16 @@ class RolloutStorage:
                 observations=self.observations[i],  # type: ignore
                 privileged_actions=self.privileged_actions[i],
                 dones=self.dones[i],
+                privileged_encoder_state=(
+                    self.privileged_encoder_state[i].clone() if self.privileged_encoder_state is not None else None
+                ),
+                encoder_state=self.encoder_state[i].clone() if self.encoder_state is not None else None,
             )
 
     # For reinforcement learning with feedforward networks
     def mini_batch_generator(self, num_mini_batches: int, num_epochs: int = 8) -> Generator[Batch, None, None]:
         """Yield shuffled flat mini-batches for feedforward RL updates."""
-        if self.training_type != "rl":
+        if self.training_type not in ("rl", "ppo_distillation"):
             raise ValueError("This function is only available for reinforcement learning training.")
         batch_size = self.num_envs * self.num_transitions_per_env
         mini_batch_size = batch_size // num_mini_batches
@@ -238,6 +275,9 @@ class RolloutStorage:
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
         advantages = self.advantages.flatten(0, 1)
         old_distribution_params = tuple(p.flatten(0, 1) for p in self.distribution_params)  # type: ignore
+        encoder_state = self.encoder_state.flatten(0, 1) if self.encoder_state is not None else None
+        privileged_actions = self.privileged_actions.flatten(0, 1) if self.training_type == "ppo_distillation" else None
+        privileged_encoder_state = self.privileged_encoder_state.flatten(0, 1) if self.privileged_encoder_state is not None else None
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -255,6 +295,9 @@ class RolloutStorage:
                     returns=returns[batch_idx],
                     old_actions_log_prob=old_actions_log_prob[batch_idx],
                     old_distribution_params=tuple(p[batch_idx] for p in old_distribution_params),
+                    encoder_state=encoder_state[batch_idx] if encoder_state is not None else None,
+                    privileged_actions=privileged_actions[batch_idx] if privileged_actions is not None else None,
+                    privileged_encoder_state=privileged_encoder_state[batch_idx] if privileged_encoder_state is not None else None,
                 )
 
     # For reinforcement learning with recurrent networks
@@ -262,7 +305,7 @@ class RolloutStorage:
         self, num_mini_batches: int, num_epochs: int = 8
     ) -> Generator[Batch, None, None]:
         """Yield trajectory mini-batches with masks and recurrent hidden states."""
-        if self.training_type != "rl":
+        if self.training_type not in ("rl", "ppo_distillation"):
             raise ValueError("This function is only available for reinforcement learning training.")
         padded_obs_trajectories, trajectory_masks = split_and_pad_trajectories(self.observations, self.dones)
         mini_batch_size = self.num_envs // num_mini_batches
@@ -289,7 +332,8 @@ class RolloutStorage:
                 # take a batch of trajectories and finally reshape back to [num_layers, batch, hidden_dim]
                 if self.saved_hidden_state_a is not None:
                     hidden_state_a_batch = [
-                        saved_hidden_state.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
+                        saved_hidden_state
+                        .permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
                         .transpose(1, 0)
                         .contiguous()
                         for saved_hidden_state in self.saved_hidden_state_a
@@ -302,7 +346,8 @@ class RolloutStorage:
                     hidden_state_a_batch = None
                 if self.saved_hidden_state_c is not None:
                     hidden_state_c_batch = [
-                        saved_hidden_state.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
+                        saved_hidden_state
+                        .permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
                         .transpose(1, 0)
                         .contiguous()
                         for saved_hidden_state in self.saved_hidden_state_c
@@ -324,6 +369,9 @@ class RolloutStorage:
                     old_distribution_params=tuple(p[:, start:stop] for p in self.distribution_params),  # type: ignore
                     hidden_states=(hidden_state_a_batch, hidden_state_c_batch),  # type: ignore
                     masks=trajectory_masks[:, first_traj:last_traj],
+                    encoder_state=self.encoder_state[:, start:stop] if self.encoder_state is not None else None,
+                    privileged_actions=self.privileged_actions[:, start:stop] if self.training_type == "ppo_distillation" else None,
+                    privileged_encoder_state=self.privileged_encoder_state[:, start:stop] if self.privileged_encoder_state is not None else None,
                 )
 
                 first_traj = last_traj
