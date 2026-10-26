@@ -8,6 +8,7 @@
 from .log_writer import LogWriter
 from .neptune_log_writer import NeptuneLogWriter
 from .utils import (
+    ParameterScheduler,
     check_nan,
     compile_model,
     get_param,
@@ -25,6 +26,7 @@ from .wandb_log_writer import WandbLogWriter
 __all__ = [
     "LogWriter",
     "NeptuneLogWriter",
+    "ParameterScheduler",
     "WandbLogWriter",
     "check_nan",
     "compile_model",

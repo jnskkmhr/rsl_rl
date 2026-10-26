@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from tensordict import TensorDict
 from typing import Callable
 
 from rsl_rl.env import VecEnv
@@ -87,6 +88,38 @@ class Symmetry:
         batch.advantages = batch.advantages.repeat(num_aug, 1)
         batch.returns = batch.returns.repeat(num_aug, 1)
 
+    @torch.no_grad()
+    def augment_replay_batch(self, batch: TensorDict) -> TensorDict:
+        """Pair sampled transitions with symmetry transforms without modifying replay.
+
+        The callback receives current and successor rows in one invocation, so each transform
+        uses the same ordering for both. Scalar rewards, boundary flags and n-step horizons are
+        assumed invariant. Every observation group, including auxiliary labels, must be transformed.
+        """
+        if not self.use_data_augmentation:
+            return batch
+        size = batch.batch_size[0]
+        observations = torch.cat((batch["observations"], batch["next_observations"]), dim=0)
+        actions = torch.cat((batch["actions"], batch["actions"]), dim=0)
+        observations, actions = self.data_augmentation_func(env=self.env, obs=observations, actions=actions)
+        if observations is None or actions is None or len(observations.batch_size) != 1:
+            raise ValueError("Replay symmetry must return observation and action batches.")
+        count = observations.batch_size[0]
+        if size == 0 or count < 4 * size or count % (2 * size) != 0:
+            raise ValueError("Replay symmetry must append complete transforms after the original samples.")
+        if actions.shape != (count, *batch["actions"].shape[1:]):
+            raise ValueError("Replay symmetry observation and action batch sizes must match.")
+        if set(observations.keys()) != set(batch["observations"].keys()):
+            raise ValueError("Replay symmetry must retain all observation groups, including auxiliary labels.")
+        repeats = count // (2 * size)
+        observations = observations.reshape(repeats, 2, size)
+        actions = actions.reshape(repeats, 2, size, *batch["actions"].shape[1:])
+        augmented = torch.cat([batch] * repeats, dim=0)
+        augmented["observations"] = observations[:, 0].reshape(repeats * size)
+        augmented["next_observations"] = observations[:, 1].reshape(repeats * size)
+        augmented["actions"] = actions[:, 0].reshape(repeats * size, *batch["actions"].shape[1:])
+        return augmented
+
     def compute_loss(self, actor: MLPModel, batch: RolloutStorage.Batch, original_batch_size: int) -> torch.Tensor:
         """Compute the mirror loss between the actor's action means on original and mirrored observations.
 
@@ -101,16 +134,27 @@ class Symmetry:
         if not self.use_data_augmentation:
             batch.observations, _ = self.data_augmentation_func(env=self.env, obs=batch.observations, actions=None)
 
-        # Action means predicted by the actor on the augmented observation batch
-        mean_actions = actor(batch.observations.detach().clone())
+        return self.compute_policy_loss(actor, batch.observations, original_batch_size, augmented=True)
 
-        # Mirror the original-slice action means using the augmentation function. We use the action means here rather
-        # than the sampled actions in ``batch.actions``, since the symmetry loss is defined on the policy mean.
+    def compute_policy_loss(
+        self,
+        policy: Callable[[TensorDict], torch.Tensor],
+        observations: TensorDict,
+        original_batch_size: int,
+        *,
+        augmented: bool = False,
+    ) -> torch.Tensor:
+        """Compare deterministic actions on reflected observations with a detached reflected target.
+
+        Accept a policy callable so both on-policy models and off-policy actor interfaces can
+        share the same mirror objective. The caller controls the model's normalization mode.
+        """
+        if not augmented:
+            observations, _ = self.data_augmentation_func(env=self.env, obs=observations, actions=None)
+        mean_actions = policy(observations.detach().clone())
         _, mean_actions_symm = self.data_augmentation_func(
             env=self.env, obs=None, actions=mean_actions[:original_batch_size]
         )
-
-        # MSE between the actor prediction on mirrored obs and the mirrored actor prediction on the original obs
         symmetry_loss = nn.functional.mse_loss(
             mean_actions[original_batch_size:],
             mean_actions_symm.detach()[original_batch_size:],

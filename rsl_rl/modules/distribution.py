@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -321,6 +322,155 @@ class HeteroscedasticGaussianDistribution(GaussianDistribution):
         elif self.std_type == "log":
             init_std_log = torch.log(torch.tensor(self.init_std + 1e-7))
             torch.nn.init.constant_(mlp[-2].bias[self.output_dim :], init_std_log)  # type: ignore
+
+
+class SquashedGaussianDistribution(HeteroscedasticGaussianDistribution):
+    """State-dependent Gaussian with smoothly bounded log scale and a tanh transform."""
+
+    def __init__(self, output_dim: int, log_std_min: float = -10.0, log_std_max: float = 2.0) -> None:
+        """Configure the pre-transform log standard deviation bounds."""
+        Distribution.__init__(self, output_dim)
+        if not math.isfinite(log_std_min) or not math.isfinite(log_std_max) or log_std_min >= log_std_max:
+            raise ValueError("Log standard deviation bounds must be finite and strictly increasing.")
+        self.log_std_min = log_std_min
+        self.log_std_max = log_std_max
+        self._distribution: Normal | None = None
+
+    def get_mean_and_std(self, mlp_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Map network outputs to the pre-tanh Gaussian parameters without caching tensors."""
+        mean, raw_log_std = torch.unbind(mlp_output, dim=-2)
+        log_std = self.log_std_min + (self.log_std_max - self.log_std_min) * 0.5 * (1 + raw_log_std.tanh())
+        return mean, log_std.exp()
+
+    def update(self, mlp_output: torch.Tensor) -> None:
+        """Update the Gaussian underlying the transformed output distribution."""
+        self._distribution = Normal(*self.get_mean_and_std(mlp_output))
+
+    def sample(self) -> torch.Tensor:
+        """Sample bounded outputs without a pathwise gradient."""
+        return self._distribution.sample().tanh()
+
+    def rsample_with_log_prob(self, mlp_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Draw a differentiable sample with its stable, transform-corrected log density."""
+        distribution = Normal(*self.get_mean_and_std(mlp_output))
+        raw = distribution.rsample()
+        correction = 2.0 * (math.log(2.0) - raw - torch.nn.functional.softplus(-2.0 * raw))
+        return raw.tanh(), (distribution.log_prob(raw) - correction).sum(dim=-1)
+
+    def deterministic_output(self, mlp_output: torch.Tensor) -> torch.Tensor:
+        """Transform the Gaussian location for deterministic inference."""
+        return mlp_output[..., 0, :].tanh()
+
+    def as_deterministic_output_module(self) -> nn.Module:
+        """Return the stateless deterministic transform for inference exporters."""
+        return _SquashedGaussianOutput()
+
+    def log_prob(self, outputs: torch.Tensor) -> torch.Tensor:
+        """Evaluate transformed action densities using the inverse tanh."""
+        eps = torch.finfo(outputs.dtype).eps
+        raw = outputs.clamp(-1 + eps, 1 - eps).atanh()
+        correction = 2.0 * (math.log(2.0) - raw - torch.nn.functional.softplus(-2.0 * raw))
+        return (self._distribution.log_prob(raw) - correction).sum(dim=-1)
+
+    @property
+    def entropy(self) -> torch.Tensor:
+        """Estimate transformed entropy with one reparameterized Gaussian sample."""
+        raw = self._distribution.rsample()
+        correction = 2.0 * (math.log(2.0) - raw - torch.nn.functional.softplus(-2.0 * raw))
+        return -(self._distribution.log_prob(raw) - correction).sum(dim=-1)
+
+    def init_mlp_weights(self, mlp: nn.Module) -> None:
+        """Retain the selected network's initialization for both predicted parameters."""
+
+
+class CategoricalValueDistribution(Distribution):
+    """A categorical distribution on a fixed scalar return support."""
+
+    bin_values: torch.Tensor
+
+    def __init__(self, output_dim: int, num_bins: int = 101, value_min: float = -5.0, value_max: float = 5.0) -> None:
+        """Configure the return bins, independent of the network or ensemble architecture."""
+        super().__init__(output_dim)
+        if output_dim != 1:
+            raise ValueError("Categorical return distributions require a scalar output.")
+        if num_bins < 2 or not math.isfinite(value_min) or not math.isfinite(value_max) or value_min >= value_max:
+            raise ValueError("Return support requires at least two bins and finite, increasing bounds.")
+        self.num_bins = num_bins
+        self.register_buffer("bin_values", torch.linspace(value_min, value_max, num_bins))
+        self._distribution = None
+
+    @property
+    def input_dim(self) -> int:
+        """Return the required number of logits."""
+        return self.num_bins
+
+    def evaluate(self, mlp_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the expected value and categorical log probabilities."""
+        log_probs = torch.nn.functional.log_softmax(mlp_output, dim=-1)
+        return (log_probs.exp() * self.bin_values).sum(dim=-1, keepdim=True), log_probs
+
+    def deterministic_output(self, mlp_output: torch.Tensor) -> torch.Tensor:
+        """Return the expected scalar return."""
+        return self.evaluate(mlp_output)[0]
+
+    def as_deterministic_output_module(self) -> nn.Module:
+        """Return an exporter-compatible expected-value transform."""
+        return _CategoricalValueOutput(self.bin_values)
+
+    def update(self, mlp_output: torch.Tensor) -> None:
+        """Cache a categorical distribution for the standard distribution interface."""
+        self._distribution = torch.distributions.Categorical(logits=mlp_output)
+
+    def sample(self) -> torch.Tensor:
+        """Sample return values on the configured support."""
+        return self.bin_values[self._distribution.sample()].unsqueeze(-1)
+
+    @property
+    def mean(self) -> torch.Tensor:
+        """Return the expected value of the current distribution."""
+        return (self._distribution.probs * self.bin_values).sum(dim=-1, keepdim=True)
+
+    @property
+    def std(self) -> torch.Tensor:
+        """Return the standard deviation on the return support."""
+        variance = (self._distribution.probs * (self.bin_values - self.mean).square()).sum(dim=-1, keepdim=True)
+        return variance.sqrt()
+
+    @property
+    def entropy(self) -> torch.Tensor:
+        """Return categorical entropy."""
+        return self._distribution.entropy()
+
+    @property
+    def params(self) -> tuple[torch.Tensor, ...]:
+        """Return the normalized logits."""
+        return (self._distribution.logits,)
+
+    def log_prob(self, outputs: torch.Tensor) -> torch.Tensor:
+        """Return probability masses at support points, and negative infinity elsewhere."""
+        matches = outputs == self.bin_values
+        return self._distribution.logits.masked_fill(~matches, -torch.inf).logsumexp(dim=-1)
+
+    def kl_divergence(self, old_params: tuple[torch.Tensor, ...], new_params: tuple[torch.Tensor, ...]) -> torch.Tensor:
+        """Compute the categorical KL divergence between two sets of logits."""
+        return torch.distributions.kl_divergence(
+            torch.distributions.Categorical(logits=old_params[0]),
+            torch.distributions.Categorical(logits=new_params[0]),
+        )
+
+
+class _SquashedGaussianOutput(nn.Module):
+    def forward(self, mlp_output: torch.Tensor) -> torch.Tensor:
+        return mlp_output[..., 0, :].tanh()
+
+
+class _CategoricalValueOutput(nn.Module):
+    def __init__(self, bin_values: torch.Tensor) -> None:
+        super().__init__()
+        self.register_buffer("bin_values", bin_values.detach().clone())
+
+    def forward(self, mlp_output: torch.Tensor) -> torch.Tensor:
+        return (mlp_output.softmax(dim=-1) * self.bin_values).sum(dim=-1, keepdim=True)
 
 
 class BetaDistribution(Distribution):

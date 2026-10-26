@@ -229,3 +229,30 @@ class TestMLPModelExport:
             )
             loaded = onnx.load(f.name)
             onnx.checker.check_model(loaded)
+
+
+class TestRuntimeInputsAndLinearHeads:
+    """Generic MLP heads support external inputs and ordinary configured distributions."""
+
+    def test_action_width_is_internal_and_differentiable(self) -> None:
+        """Extra inputs enter before the MLP without changing observation groups or their normalization."""
+        model, obs = _make_mlp_model(extra_input_dim=2, obs_normalization=True)
+        actions = torch.randn(NUM_ENVS, 2, requires_grad=True)
+        model.update_normalization(obs)
+        expected_input = torch.cat((model.obs_normalizer(obs["policy"]), actions), dim=-1)
+        result = model(obs, extra_input=actions)
+        torch.testing.assert_close(result, model.mlp(expected_input))
+        assert torch.autograd.grad(result.sum(), actions)[0].abs().sum() > 0
+        assert model.obs_groups == ["policy"]
+        with pytest.raises(ValueError, match="requires extra_input"):
+            model(obs)
+
+    @pytest.mark.parametrize("distribution", ["SquashedGaussianDistribution", "CategoricalValueDistribution"])
+    def test_distributions_work_on_existing_linear_mlp_head(self, distribution: str) -> None:
+        """No compositional wrapper is needed to select either distribution."""
+        model, obs = _make_mlp_model(hidden_dims=[], distribution_cfg={"class_name": distribution})
+        expected_shape = (NUM_ENVS, 1)
+        assert model(obs).shape == expected_shape
+        assert model(obs, stochastic_output=True).shape == expected_shape
+        exported = torch.jit.script(model.as_jit())
+        torch.testing.assert_close(exported(obs["policy"]), model(obs))

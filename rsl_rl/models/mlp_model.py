@@ -37,6 +37,7 @@ class MLPModel(nn.Module):
         activation: str = "elu",
         obs_normalization: bool = False,
         distribution_cfg: dict | None = None,
+        extra_input_dim: int = 0,
     ) -> None:
         """Initialize the MLP-based model.
 
@@ -50,11 +51,15 @@ class MLPModel(nn.Module):
             obs_normalization: Whether to normalize the observations before feeding them to the MLP.
             distribution_cfg: Configuration dictionary for the output distribution. If provided, the model outputs
                 stochastic values sampled from the distribution.
+            extra_input_dim: Width of an additional runtime input, such as a Q critic's action.
         """
         super().__init__()
 
         # Resolve observation groups and dimensions
         self.obs_groups, self.obs_dim = self._get_obs_dim(obs, obs_groups, obs_set)
+        if extra_input_dim < 0:
+            raise ValueError("extra_input_dim must be nonnegative.")
+        self.extra_input_dim = extra_input_dim
 
         # Observation normalization
         self.obs_normalization = obs_normalization
@@ -85,6 +90,7 @@ class MLPModel(nn.Module):
         masks: torch.Tensor | None = None,
         hidden_state: HiddenState = None,
         stochastic_output: bool = False,
+        extra_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass of the MLP model.
 
@@ -96,7 +102,11 @@ class MLPModel(nn.Module):
         # If observations are padded for recurrent training but the model is non-recurrent, unpad the observations
         obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
         # Get MLP input latent
-        latent = self.get_latent(obs, masks, hidden_state)
+        if extra_input is not None:
+            extra_input = unpad_trajectories(extra_input, masks) if masks is not None else extra_input
+            latent = self.get_latent(obs, masks, hidden_state, extra_input=extra_input)
+        else:
+            latent = self.get_latent(obs, masks, hidden_state)
         # MLP forward pass
         mlp_output = self.mlp(latent)
         # If stochastic output is requested, update the distribution and sample from it, otherwise return MLP output
@@ -108,13 +118,23 @@ class MLPModel(nn.Module):
         return mlp_output
 
     def get_latent(
-        self, obs: TensorDict, masks: torch.Tensor | None = None, hidden_state: HiddenState = None
+        self,
+        obs: TensorDict,
+        masks: torch.Tensor | None = None,
+        hidden_state: HiddenState = None,
+        extra_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Build the model latent by concatenating and normalizing selected observation groups."""
         # Select and concatenate observations
         latent = torch.cat([obs[obs_group] for obs_group in self.obs_groups], dim=-1)
         # Normalize observations
         latent = self.obs_normalizer(latent)
+        if self.extra_input_dim:
+            if extra_input is None or extra_input.shape[-1] != self.extra_input_dim:
+                raise ValueError("The model requires extra_input with its configured width.")
+            latent = torch.cat((latent, extra_input), dim=-1)
+        elif extra_input is not None:
+            raise ValueError("This model has no configured extra input.")
         return latent
 
     def reset(self, dones: torch.Tensor | None = None, hidden_state: HiddenState = None) -> None:
@@ -190,7 +210,7 @@ class MLPModel(nn.Module):
 
     def _get_latent_dim(self) -> int:
         """Return the latent dimensionality consumed by the MLP head."""
-        return self.obs_dim
+        return self.obs_dim + self.extra_input_dim
 
 
 class _TorchMLPModel(nn.Module):

@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import copy
 import importlib
+import math
 import pkgutil
 import torch
 import warnings
+from bisect import bisect_right
 from collections.abc import Iterable
 from tensordict import TensorDict
 from typing import Any, Callable
@@ -461,3 +463,47 @@ def unpad_trajectories(trajectories: torch.Tensor | TensorDict, masks: torch.Ten
     else:
         # For standard Tensors, we must explicitly handle feature dimensions in view()
         return valid_steps.view(-1, trajectories.shape[0], *trajectories.shape[2:]).transpose(1, 0)
+
+
+class ParameterScheduler:
+    """Stateless numeric schedule evaluated at an explicit, nonnegative step."""
+
+    def __init__(self, type: str, params: dict) -> None:
+        """Validate a linear ramp or a piecewise-constant discrete schedule."""
+        self.type = type
+        if type == "linear":
+            required = {"start_step", "end_step", "start_value", "end_value"}
+            if set(params) != required:
+                raise ValueError(f"Linear schedule params must be {sorted(required)}.")
+            self.steps = (params["start_step"], params["end_step"])
+            self.values = (params["start_value"], params["end_value"])
+        elif type == "discrete":
+            if set(params) != {"steps", "values"}:
+                raise ValueError("Discrete schedule params must be steps and values.")
+            self.steps = tuple(params["steps"])
+            self.values = tuple(params["values"])
+            if not self.steps or self.steps[0] != 0:
+                raise ValueError("Discrete schedules must start at step zero.")
+        else:
+            raise ValueError(f"Unknown scheduler type: {type!r}.")
+        if len(self.steps) != len(self.values) or not self.steps:
+            raise ValueError("Schedule steps and values must have matching, nonempty lengths.")
+        if any(isinstance(step, bool) or not isinstance(step, int) or step < 0 for step in self.steps):
+            raise ValueError("Schedule steps must be nonnegative integers.")
+        if any(b <= a for a, b in zip(self.steps, self.steps[1:])):
+            raise ValueError("Schedule steps must be strictly increasing.")
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+            for value in self.values
+        ):
+            raise ValueError("Schedule values must be finite numbers.")
+
+    def __call__(self, step: int) -> float | int:
+        """Evaluate without advancing hidden state; milestone changes apply at their exact step."""
+        if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+            raise ValueError("Schedule evaluation requires a nonnegative integer step.")
+        if self.type == "discrete":
+            return self.values[bisect_right(self.steps, step) - 1]
+        start, end = self.steps
+        fraction = min(1.0, max(0.0, (step - start) / (end - start)))
+        return self.values[0] + (self.values[1] - self.values[0]) * fraction

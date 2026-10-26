@@ -219,3 +219,44 @@ class TestComputeLoss:
 
         loss = sym.compute_loss(odd_actor, batch, NUM_ENVS)  # type: ignore
         assert loss.item() < 1e-6
+
+
+def test_replay_symmetry_pairs_successors_labels_and_boundary_metadata() -> None:
+    """A reflected replay row must keep its own successor, labels and shortened horizon."""
+    obs = TensorDict({"policy": torch.tensor([[1.0], [2.0]]), "label": torch.tensor([[3.0], [4.0]])}, [2])
+    batch = TensorDict(
+        {
+            "observations": obs,
+            "next_observations": obs + 10,
+            "actions": torch.tensor([[5.0], [6.0]]),
+            "rewards": torch.tensor([7.0, 8.0]),
+            "terminated": torch.tensor([True, False]),
+            "truncated": torch.tensor([False, True]),
+            "bootstrap_discount": torch.tensor([0.9, 0.81]),
+            "bootstrap_steps": torch.tensor([1, 2]),
+        },
+        [2],
+    )
+    original = batch.clone()
+    symmetry = Symmetry(None, _negate_augmentation, use_data_augmentation=True)
+    result = symmetry.augment_replay_batch(batch)
+    torch.testing.assert_close(result["observations", "policy"], torch.tensor([[1.0], [2.0], [-1.0], [-2.0]]))
+    torch.testing.assert_close(result["next_observations", "policy"], torch.tensor([[11.0], [12.0], [-11.0], [-12.0]]))
+    torch.testing.assert_close(result["next_observations", "label"], torch.tensor([[13.0], [14.0], [-13.0], [-14.0]]))
+    torch.testing.assert_close(result["actions"], torch.tensor([[5.0], [6.0], [-5.0], [-6.0]]))
+    for key in ("rewards", "terminated", "truncated", "bootstrap_discount", "bootstrap_steps"):
+        torch.testing.assert_close(result[key], torch.cat((original[key], original[key])))
+    result["observations", "policy"].zero_()
+    for key, value in original.items(True, True):
+        torch.testing.assert_close(batch[key], value)
+
+
+def test_policy_mirror_loss_detaches_the_target_branch() -> None:
+    """The mirror target is a fixed target, not a second path into policy parameters."""
+    bias = torch.nn.Parameter(torch.tensor([0.5]))
+    obs = TensorDict({"policy": torch.tensor([[1.0], [2.0]])}, [2])
+    symmetry = Symmetry(None, _negate_augmentation, use_mirror_loss=True)
+    loss = symmetry.compute_policy_loss(lambda inputs: inputs["policy"] + bias, obs, 2)
+    torch.testing.assert_close(loss, torch.tensor(1.0))
+    loss.backward()
+    torch.testing.assert_close(bias.grad, torch.tensor([2.0]))

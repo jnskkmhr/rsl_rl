@@ -314,3 +314,51 @@ class TestBetaDistribution:
         dist.log_prob(samples).sum().backward()
         assert mlp_output.grad is not None
         assert not torch.all(mlp_output.grad == 0)
+
+
+class TestOffPolicyDistributions:
+    """Distribution math remains independent of network architecture and algorithm wrappers."""
+
+    def test_squashed_density_and_pathwise_gradient(self) -> None:
+        """The transformed density matches PyTorch and sampling propagates gradients."""
+        from rsl_rl.modules import SquashedGaussianDistribution
+
+        dist = SquashedGaussianDistribution(2, log_std_min=-2.0, log_std_max=0.0)
+        output = torch.tensor([[[0.2, -0.4], [0.1, 0.3]]], requires_grad=True)
+        action, log_prob = dist.rsample_with_log_prob(output)
+        mean, std = dist.get_mean_and_std(output)
+        expected = (
+            torch.distributions.TransformedDistribution(
+                torch.distributions.Normal(mean, std), [torch.distributions.TanhTransform()]
+            )
+            .log_prob(action)
+            .sum(-1)
+        )
+        torch.testing.assert_close(log_prob, expected)
+        gradient = torch.autograd.grad(action.sum() + log_prob.sum(), output)[0]
+        assert gradient.isfinite().all() and gradient.abs().sum() > 0
+        # Stateless SAC evaluation must not cache non-leaf tensors in the model.
+        assert dist._distribution is None
+
+    def test_squashed_density_stays_finite_at_saturation(self) -> None:
+        """Large Gaussian locations must not produce NaN entropy terms after tanh saturates."""
+        from rsl_rl.modules import SquashedGaussianDistribution
+
+        dist = SquashedGaussianDistribution(1)
+        output = torch.tensor([[[100.0], [0.0]], [[-100.0], [0.0]]], requires_grad=True)
+        _, log_prob = dist.rsample_with_log_prob(output)
+        assert log_prob.isfinite().all()
+        assert torch.autograd.grad(log_prob.sum(), output)[0].isfinite().all()
+
+    def test_categorical_value_expectation_and_independent_batch_axes(self) -> None:
+        """Expected returns preserve batch/ensemble axes and use the configured support."""
+        from rsl_rl.modules import CategoricalValueDistribution
+
+        dist = CategoricalValueDistribution(1, num_bins=3, value_min=-2, value_max=2)
+        logits = torch.tensor([[[0.0, 0.0, 0.0], [-2.0, 0.0, 2.0]]], requires_grad=True)
+        value, log_prob = dist.evaluate(logits)
+        assert value.shape == (1, 2, 1) and log_prob.shape == (1, 2, 3)
+        torch.testing.assert_close(value[0, 0], torch.zeros(1))
+        torch.testing.assert_close(value, (logits.softmax(-1) * torch.tensor([-2, 0, 2])).sum(-1, keepdim=True))
+        assert torch.autograd.grad(value.sum(), logits)[0].abs().sum() > 0
+        torch.testing.assert_close(dist.as_deterministic_output_module()(logits), value)

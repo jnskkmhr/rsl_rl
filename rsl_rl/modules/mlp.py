@@ -52,21 +52,20 @@ class MLP(nn.Sequential):
 
         # Create layers sequentially
         layers = []
-        layers.append(nn.Linear(input_dim, hidden_dims_processed[0]))
-        layers.append(activation_mod)
-
-        for layer_index in range(len(hidden_dims_processed) - 1):
-            layers.append(nn.Linear(hidden_dims_processed[layer_index], hidden_dims_processed[layer_index + 1]))
+        previous_dim = input_dim
+        for hidden_dim in hidden_dims_processed:
+            layers.append(nn.Linear(previous_dim, hidden_dim))
             layers.append(activation_mod)
+            previous_dim = hidden_dim
 
         # Add last layer
         if isinstance(output_dim, int):
-            layers.append(nn.Linear(hidden_dims_processed[-1], output_dim))
+            layers.append(nn.Linear(previous_dim, output_dim))
         else:
             # Compute the total output dimension
             total_out_dim = reduce(lambda x, y: x * y, output_dim)
             # Add a layer to reshape the output to the desired shape
-            layers.append(nn.Linear(hidden_dims_processed[-1], total_out_dim))
+            layers.append(nn.Linear(previous_dim, total_out_dim))
             layers.append(nn.Unflatten(dim=-1, unflattened_size=output_dim))
 
         # Add last activation function if specified
