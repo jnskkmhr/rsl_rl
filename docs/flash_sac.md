@@ -6,7 +6,7 @@ They require explicitly supplied policy and critic models. The reference network
 provided by `compositional_rsl_rl`, not by the core package.
 Installing the compositional FlashSAC branch automatically installs its pinned revision of this fork.
 For core development, install this checkout with `python -m pip install -e /path/to/rsl_rl`.
-The local version `5.5.1+flashsac.1` identifies this development fork, not an upstream release.
+The local version `5.5.1+flashsac.2` identifies this development fork, not an upstream release.
 
 ## Source and numerical contract
 
@@ -159,3 +159,19 @@ The algorithm checkpoint stores the applied schedule step and the runner stores 
 steps. A full resume restores current values, then advances at the next collection. Inference and
 export retain the saved action bound. Schedule configuration must match for optimizer resume;
 weights-only transfer may use a new schedule. With no curriculum configured, existing behavior is unchanged.
+
+## Replay curricula and time budgets
+
+`OffPolicyRunner` accepts optional `replay_cfg`, `max_time_s`, and
+`save_interval_updates` settings. `replay_cfg.class_name` resolves a transform
+constructed with the environment and remaining configuration arguments. The
+transform starts with the remaining wall-time budget, runs before each collection,
+adds transition fields, and transforms sampled batches. Its `sum_keys` identifies
+fields that replay must accumulate with the same n-step discount and episode
+boundaries as rewards. This supports current-weight reward relabeling without
+putting task-specific reward logic into the algorithm.
+
+`max_time_s` stops collection and updates at the deadline and still saves the final
+learner. `learn(process_started=...)` can include environment setup in the budget;
+otherwise the clock starts at `learn`. `save_interval_updates` overrides periodic
+iteration-based saves and counts learner updates. These options default to disabled.

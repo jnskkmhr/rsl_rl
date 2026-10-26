@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import os
 import time
 import torch
@@ -22,7 +23,14 @@ from rsl_rl.utils.logger import Logger
 
 
 class OffPolicyRunner:
-    """Collect vector steps and train FlashSAC from bounded replay."""
+    """Collect vector steps and train FlashSAC from bounded replay.
+
+    An optional ``replay_cfg`` resolves an environment-side transform with
+    ``start(remaining_seconds)``, ``before_collection(step)``,
+    ``process_transition(transition)`` and ``process_batch(batch)`` methods.
+    Its ``sum_keys`` declares fields accumulated over the replay's n-step horizon.
+    This keeps simulator-specific reward curricula outside the learner.
+    """
 
     def __init__(self, env: VecEnv, train_cfg: dict, log_dir: str | None = None, device: str = "cpu") -> None:
         """Construct the learner; defer replay allocation until training collects its first step."""
@@ -55,9 +63,27 @@ class OffPolicyRunner:
         self.current_learning_iteration = 0
         self.collection_steps = 0
         self.replay = None
+        self.max_time_s = self.cfg.get("max_time_s")
+        if self.max_time_s is not None and (not math.isfinite(self.max_time_s) or self.max_time_s <= 0):
+            raise ValueError("max_time_s must be finite and positive.")
+        self.save_interval_updates = self.cfg.get("save_interval_updates")
+        if self.save_interval_updates is not None and (
+            type(self.save_interval_updates) is not int or self.save_interval_updates < 1
+        ):
+            raise ValueError("save_interval_updates must be a positive integer.")
+        replay_cfg = copy.deepcopy(self.cfg.get("replay_cfg"))
+        self.replay_transform = None
+        if replay_cfg:
+            self.replay_transform = resolve_callable(replay_cfg.pop("class_name"))(env, **replay_cfg)
 
-    def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
+    def learn(
+        self, num_learning_iterations: int, init_at_random_ep_len: bool = False, *, process_started: float | None = None
+    ) -> None:
         """Collect num_steps_per_env vector steps per iteration, with updates after every step."""
+        started = time.perf_counter() if process_started is None else process_started
+        deadline = None if self.max_time_s is None else started + self.max_time_s
+        if deadline is not None and time.perf_counter() >= deadline:
+            raise RuntimeError("Setup exhausted the training time budget.")
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
@@ -67,11 +93,19 @@ class OffPolicyRunner:
         obs = self.env.get_observations().to(self.device).clone()
         start_it = self.current_learning_iteration
         total_it = start_it + num_learning_iterations
+        if self.replay_transform is not None:
+            self.replay_transform.start(None if deadline is None else deadline - time.perf_counter())
         for it in range(start_it, total_it):
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
             collect_time = learn_time = 0.0
             totals, counts = {}, {}
             for _ in range(self.cfg["num_steps_per_env"]):
                 start = time.perf_counter()
+                if deadline is not None and start >= deadline:
+                    break
+                if self.replay_transform is not None:
+                    self.replay_transform.before_collection(self.collection_steps)
                 for name, value in self.alg.update_curriculum(self.collection_steps).items():
                     key = f"curriculum/{name}"
                     totals[key] = totals.get(key, 0.0) + value
@@ -115,6 +149,8 @@ class OffPolicyRunner:
                         ),
                         batch_size=[self.env.num_envs],
                     )
+                    if self.replay_transform is not None:
+                        transition = self.replay_transform.process_transition(transition)
                     if self.replay is None:
                         self.replay = ReplayStorage(
                             transition,
@@ -122,6 +158,7 @@ class OffPolicyRunner:
                             self.cfg["replay_max_bytes"],
                             self.alg.gamma,
                             self.cfg["n_step"],
+                            sum_keys=("rewards",) if self.replay_transform is None else self.replay_transform.sum_keys,
                         )
                     self.replay.add(transition)
                     self.alg.observe_rewards(rewards, terminated, truncated)
@@ -132,12 +169,23 @@ class OffPolicyRunner:
                 start = time.perf_counter()
                 if self.replay.size >= self.cfg["warmup_transitions"]:
                     for _ in range(self.cfg["updates_per_step"]):
-                        metrics = self.alg.update(self.replay.sample(self.cfg["batch_size"]))
+                        if deadline is not None and time.perf_counter() >= deadline:
+                            break
+                        batch = self.replay.sample(self.cfg["batch_size"])
+                        if self.replay_transform is not None:
+                            batch = self.replay_transform.process_batch(batch)
+                        metrics = self.alg.update(batch)
                         for key, value in metrics.items():
                             if not torch.isfinite(value).all():
                                 raise RuntimeError(f"Nonfinite FlashSAC metric: {key}")
                             totals[key] = totals.get(key, 0.0) + value.item()
                             counts[key] = counts.get(key, 0) + 1
+                        if (
+                            self.logger.writer is not None
+                            and self.save_interval_updates is not None
+                            and self.alg.update_step % self.save_interval_updates == 0
+                        ):
+                            self.save(os.path.join(self.logger.log_dir, f"model_update_{self.alg.update_step}.pt"))
                 learn_time += time.perf_counter() - start
             self.current_learning_iteration = it + 1
             with torch.no_grad():
@@ -152,8 +200,13 @@ class OffPolicyRunner:
                 self.alg.learning_rate,
                 std,
                 None,
+                remaining_time=None if deadline is None else max(0.0, deadline - time.perf_counter()),
             )
-            if self.logger.writer is not None and (it + 1) % self.cfg["save_interval"] == 0:
+            if (
+                self.logger.writer is not None
+                and self.save_interval_updates is None
+                and (it + 1) % self.cfg["save_interval"] == 0
+            ):
                 self.save(os.path.join(self.logger.log_dir, f"model_{it + 1}.pt"))
         if self.logger.writer is not None:
             self.save(os.path.join(self.logger.log_dir, f"model_{self.current_learning_iteration}.pt"))

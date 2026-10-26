@@ -445,3 +445,80 @@ def test_curriculum_rejects_parameters_without_runtime_support(name: str) -> Non
     env = AutoResetEnv()
     with pytest.raises(ValueError, match="not runtime-schedulable"):
         FlashSAC.construct_algorithm(env.obs, env, cfg, "cpu")
+
+
+def test_runner_relabels_accumulated_components_with_current_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replay retains unweighted n-step costs and applies the current curriculum at sampling."""
+
+    class RewardTransform:
+        sum_keys = ("rewards", "cost")
+
+        def __init__(self, env: AutoResetEnv) -> None:
+            self.weight = 1.0
+
+        def start(self, remaining_seconds: float | None) -> None:
+            pass
+
+        def before_collection(self, step: int) -> None:
+            self.weight = 1.0 if step < 4 else 3.0
+
+        def process_transition(self, batch: TensorDict) -> TensorDict:
+            batch["cost"] = torch.ones_like(batch["rewards"])
+            return batch
+
+        def process_batch(self, batch: TensorDict) -> TensorDict:
+            # An independent geometric sum verifies accumulation stops at episode boundaries.
+            expected_cost = (1 - batch["bootstrap_discount"]) / (1 - 0.99)
+            torch.testing.assert_close(batch["cost"], expected_cost, atol=3e-6, rtol=3e-6)
+            batch["rewards"] = batch["rewards"] - self.weight * batch["cost"]
+            batch["applied_weight"] = torch.full_like(batch["rewards"], self.weight)
+            return batch
+
+    cfg = config()
+    cfg["replay_cfg"] = {"class_name": RewardTransform}
+    runner = OffPolicyRunner(AutoResetEnv(), cfg)
+    weights = []
+    update = runner.alg.update
+
+    def record_update(batch: TensorDict) -> dict[str, torch.Tensor]:
+        weights.append(batch["applied_weight"][0].item())
+        return update(batch)
+
+    monkeypatch.setattr(runner.alg, "update", record_update)
+    runner.learn(6)
+    assert weights == [1.0, 1.0, 3.0, 3.0, 3.0, 3.0]
+    assert "applied_weight" not in runner.replay.storage
+
+
+def test_runner_deadline_stops_updates_and_checkpoints_count_updates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deadline reached inside a collection's updates still saves the final learner."""
+    import rsl_rl.runners.off_policy_runner as runner_module
+
+    clock = [100.0]
+    monkeypatch.setattr(runner_module.time, "perf_counter", lambda: clock[0])
+    env = AutoResetEnv()
+    step = env.step
+
+    def timed_step(actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
+        clock[0] += 0.1
+        return step(actions)
+
+    monkeypatch.setattr(env, "step", timed_step)
+    cfg = config()
+    cfg.update(n_step=1, warmup_transitions=2, max_time_s=1.0, save_interval_updates=2, logger="tensorboard")
+    runner = OffPolicyRunner(env, cfg, log_dir=str(tmp_path))
+    update = runner.alg.update
+
+    def timed_update(batch: TensorDict) -> dict[str, torch.Tensor]:
+        result = update(batch)
+        clock[0] += 0.3
+        return result
+
+    monkeypatch.setattr(runner.alg, "update", timed_update)
+    runner.learn(100, process_started=100.0)
+    assert runner.collection_steps == 2
+    assert runner.alg.update_step == 3
+    assert (tmp_path / "model_update_2.pt").is_file()
+    assert (tmp_path / "model_2.pt").is_file()
