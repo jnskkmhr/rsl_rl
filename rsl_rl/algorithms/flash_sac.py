@@ -12,12 +12,14 @@ from __future__ import annotations
 import copy
 import math
 import torch
+import torch.distributed as dist
+from collections.abc import Iterable
 from tensordict import TensorDict
 from torch import nn
 
 from rsl_rl.env import VecEnv
 from rsl_rl.extensions import Symmetry, resolve_symmetry_config
-from rsl_rl.utils import ParameterScheduler, resolve_class, resolve_obs_groups
+from rsl_rl.utils import ParameterScheduler, reduce_gradients_in_buckets, resolve_class, resolve_obs_groups
 
 
 @torch.no_grad()
@@ -56,6 +58,8 @@ class FlashSAC:
         use_amp: bool = False,
         symmetry_cfg: dict | None = None,
         curriculum_cfg: dict | None = None,
+        multi_gpu_cfg: dict | None = None,
+        grad_reduce_bucket_mb: float = 25,
     ) -> None:
         """Construct optimizers and targets; replay allocation belongs to the runner."""
         self.training_config = dict(
@@ -81,6 +85,12 @@ class FlashSAC:
         if symmetry_cfg:
             self.training_config["symmetry_cfg"] = {key: value for key, value in symmetry_cfg.items() if key != "env"}
         self.device = torch.device(device)
+        self.is_multi_gpu = multi_gpu_cfg is not None
+        self.gpu_world_size = multi_gpu_cfg["world_size"] if multi_gpu_cfg else 1
+        self.gpu_global_rank = multi_gpu_cfg["global_rank"] if multi_gpu_cfg else 0
+        if not math.isfinite(grad_reduce_bucket_mb) or grad_reduce_bucket_mb <= 0:
+            raise ValueError("grad_reduce_bucket_mb must be positive and finite.")
+        self.grad_reduce_bucket_mb = grad_reduce_bucket_mb
         if use_amp and self.device.type != "cuda":
             raise ValueError("FlashSAC FP16 AMP requires CUDA.")
         positive = (
@@ -230,8 +240,8 @@ class FlashSAC:
         Their forwards consume concatenated observation tensors; graph integrations can
         override actor_observations and critic_observations to retain named inputs.
         """
-        if cfg.get("multi_gpu") or cfg.get("torch_compile_mode"):
-            raise ValueError("FlashSAC currently supports eager, single-device training.")
+        if cfg.get("torch_compile_mode"):
+            raise ValueError("FlashSAC currently supports eager training.")
         alg_cfg = copy.deepcopy(cfg["algorithm"])
         alg_cfg.pop("class_name")
         alg_cfg = resolve_symmetry_config(alg_cfg, env)
@@ -246,7 +256,15 @@ class FlashSAC:
                 )
             model_class, model_cfg = resolve_class(cfg[role])
             models[role] = model_class(obs, groups, role, env.num_actions, **model_cfg)
-        return FlashSAC(models["actor"], models["critic"], env.num_actions, groups, device=device, **alg_cfg)
+        return FlashSAC(
+            models["actor"],
+            models["critic"],
+            env.num_actions,
+            groups,
+            device=device,
+            multi_gpu_cfg=cfg.get("multi_gpu"),
+            **alg_cfg,
+        )
 
     def actor_observations(self, obs: TensorDict) -> torch.Tensor:
         """Select actor inputs; compositional algorithms may retain the TensorDict."""
@@ -294,14 +312,23 @@ class FlashSAC:
         returns = self.gamma * self.reward_return + rewards
         self.reward_max = torch.maximum(self.reward_max, returns.abs().max())
         count = float(returns.shape[0])
-        delta = returns.mean() - self.reward_mean
+        mean, variance = returns.mean(), returns.var(unbiased=False)
+        if self.is_multi_gpu:
+            # Center moments on the shared previous mean to avoid cancellation.
+            shifted = returns - self.reward_mean
+            moments = torch.stack((shifted.sum(), shifted.square().sum(), returns.new_tensor(count)))
+            dist.all_reduce(moments, op=dist.ReduceOp.SUM)
+            count = moments[2]
+            delta = moments[0] / count
+            mean = self.reward_mean + delta
+            variance = (moments[1] / count - delta.square()).clamp_min(0)
+            dist.all_reduce(self.reward_max, op=dist.ReduceOp.MAX)
+        delta = mean - self.reward_mean
         total = self.reward_count + count
         ratio = count / total
         self.reward_mean = self.reward_mean + delta * ratio
         self.reward_var = (
-            self.reward_var * (self.reward_count + 1e-4)
-            + returns.var(unbiased=False) * count
-            + delta.square() * self.reward_count * ratio
+            self.reward_var * (self.reward_count + 1e-4) + variance * count + delta.square() * self.reward_count * ratio
         ) / total
         self.reward_count = total
         self.reward_return = returns * (~(terminated | truncated)).float()
@@ -319,10 +346,13 @@ class FlashSAC:
         optimizer.zero_grad(set_to_none=True)
         if self.use_amp and name != "temperature":
             self.grad_scaler.scale(loss).backward()
+            # Reduce scaled gradients before unscaling so overflow decisions agree.
+            self.reduce_parameters(optimizer)
             self.grad_scaler.step(optimizer)
             self.grad_scaler.update()
         else:
             loss.backward()
+            self.reduce_parameters(optimizer)
             optimizer.step()
         self.schedulers[name].step()
         if name != "temperature":
@@ -403,7 +433,51 @@ class FlashSAC:
         self.update_step += 1
         metrics.update({"critic/loss": critic_loss, "critic/max_entropy_bonus": entropy.max()})
         metrics.update(self.update_auxiliary(batch))
+        if self.is_multi_gpu:
+            self.synchronize_buffers()
         return {key: value.detach() for key, value in metrics.items()}
+
+    def broadcast_parameters(self, models: Iterable[nn.Module] | None = None) -> None:
+        """Initialize all replicas from rank zero, including target and temperature state."""
+        if not self.is_multi_gpu:
+            return
+        for model in self.models.values() if models is None else models:
+            for tensor in model.state_dict().values():
+                dist.broadcast(tensor, src=0)
+
+    def reduce_parameters(self, optimizer: torch.optim.Optimizer) -> None:
+        """Average this optimizer's gradients using the existing RSL-RL bucket reducer."""
+        if self.is_multi_gpu:
+            parameters = (p for group in optimizer.param_groups for p in group["params"])
+            reduce_gradients_in_buckets(parameters, self.gpu_world_size, self.grad_reduce_bucket_mb)
+
+    @torch.no_grad()
+    def synchronize_buffers(self, models: Iterable[nn.Module] | None = None) -> None:
+        """Share running buffers after local-batch training; this is not synchronized batch norm.
+
+        Floating buffers are averaged, integer counters take the maximum. Training
+        uses each rank's local minibatch statistics; inference uses shared running statistics.
+        """
+        if not self.is_multi_gpu:
+            return
+        groups = {}
+        seen = set()
+        for model in self.models.values() if models is None else models:
+            for buffer in model.buffers():
+                if id(buffer) not in seen:
+                    seen.add(id(buffer))
+                    groups.setdefault((buffer.device, buffer.dtype), []).append(buffer)
+        for buffers in groups.values():
+            flat = torch.cat([buffer.reshape(-1) for buffer in buffers])
+            floating = flat.is_floating_point()
+            dist.all_reduce(flat, op=dist.ReduceOp.SUM if floating else dist.ReduceOp.MAX)
+            if floating:
+                flat /= self.gpu_world_size
+            offset = 0
+            for buffer in buffers:
+                count = buffer.numel()
+                buffer.copy_(flat[offset : offset + count].reshape_as(buffer))
+                offset += count
 
     def train_mode(self) -> None:
         """Enable model training; FlashSAC batch norm is controlled per forward call."""

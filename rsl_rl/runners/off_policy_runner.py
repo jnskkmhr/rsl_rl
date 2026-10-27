@@ -10,6 +10,7 @@ import math
 import os
 import time
 import torch
+import torch.distributed as dist
 import warnings
 from math import prod as math_prod
 from pathlib import Path
@@ -34,11 +35,10 @@ class OffPolicyRunner:
 
     def __init__(self, env: VecEnv, train_cfg: dict, log_dir: str | None = None, device: str = "cpu") -> None:
         """Construct the learner; defer replay allocation until training collects its first step."""
-        if int(os.getenv("WORLD_SIZE", "1")) > 1 or train_cfg.get("multi_gpu"):
-            raise ValueError("OffPolicyRunner currently supports one learner device.")
         self.env = env
         self.cfg = copy.deepcopy(train_cfg)
         self.device = device
+        self._configure_multi_gpu()
         for key in (
             "num_steps_per_env",
             "updates_per_step",
@@ -59,7 +59,16 @@ class OffPolicyRunner:
         self.obs_shapes = {key: tuple(value.shape[1:]) for key, value in obs.items()}
         cls = resolve_callable(self.cfg["algorithm"]["class_name"])
         self.alg = cls.construct_algorithm(obs, env, self.cfg, device)
-        self.logger = Logger(log_dir, self.cfg, env.cfg, env.num_envs, False, 1, 0, device)
+        self.logger = Logger(
+            log_dir,
+            self.cfg,
+            env.cfg,
+            env.num_envs,
+            self.is_distributed,
+            self.gpu_world_size,
+            self.gpu_global_rank,
+            device,
+        )
         self.current_learning_iteration = 0
         self.collection_steps = 0
         self.replay = None
@@ -76,33 +85,88 @@ class OffPolicyRunner:
         if replay_cfg:
             self.replay_transform = resolve_callable(replay_cfg.pop("class_name"))(env, **replay_cfg)
 
+    def _configure_multi_gpu(self) -> None:
+        """Use torchrun ranks and one local replay/learner replica per process."""
+        self.gpu_world_size = int(os.getenv("WORLD_SIZE", "1"))
+        self.is_distributed = self.gpu_world_size > 1
+        self.gpu_local_rank = int(os.getenv("LOCAL_RANK", "0")) if self.is_distributed else 0
+        self.gpu_global_rank = int(os.getenv("RANK", "0")) if self.is_distributed else 0
+        self.cfg["multi_gpu"] = None
+        if not self.is_distributed:
+            return
+        if not 0 <= self.gpu_global_rank < self.gpu_world_size:
+            raise ValueError("Distributed rank must be within WORLD_SIZE.")
+        device = torch.device(self.device)
+        if device.type == "cuda":
+            if device.index != self.gpu_local_rank:
+                raise ValueError(f"Device {self.device} does not match LOCAL_RANK={self.gpu_local_rank}.")
+            torch.cuda.set_device(device)
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend="nccl" if device.type == "cuda" else "gloo",
+                rank=self.gpu_global_rank,
+                world_size=self.gpu_world_size,
+            )
+        if dist.get_rank() != self.gpu_global_rank or dist.get_world_size() != self.gpu_world_size:
+            raise ValueError("Existing process group does not match torchrun ranks.")
+        self.cfg["multi_gpu"] = dict(
+            global_rank=self.gpu_global_rank, local_rank=self.gpu_local_rank, world_size=self.gpu_world_size
+        )
+
+    def _budget_expired(self, deadline: float | None) -> bool:
+        """Stop every rank when any rank reaches its local wall-time deadline."""
+        if deadline is None:
+            return False
+        expired = time.perf_counter() >= deadline
+        if self.is_distributed:
+            flag = torch.tensor(int(expired), device=self.device)
+            dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+            expired = bool(flag.item())
+        return expired
+
+    def _replay_ready(self) -> bool:
+        """Begin updates only when every rank's local n-step replay has warmed up."""
+        ready = self.replay is not None and self.replay.size >= self.cfg["warmup_transitions"]
+        if self.is_distributed:
+            flag = torch.tensor(int(ready), device=self.device)
+            dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+            ready = bool(flag.item())
+        return ready
+
     def learn(
         self, num_learning_iterations: int, init_at_random_ep_len: bool = False, *, process_started: float | None = None
     ) -> None:
         """Collect num_steps_per_env vector steps per iteration, with updates after every step."""
         started = time.perf_counter() if process_started is None else process_started
         deadline = None if self.max_time_s is None else started + self.max_time_s
-        if deadline is not None and time.perf_counter() >= deadline:
+        if self._budget_expired(deadline):
             raise RuntimeError("Setup exhausted the training time budget.")
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
             )
         self.alg.train_mode()
+        if self.is_distributed:
+            self.alg.broadcast_parameters()
         self.logger.init_logging_writer()
         obs = self.env.get_observations().to(self.device).clone()
         start_it = self.current_learning_iteration
         total_it = start_it + num_learning_iterations
         if self.replay_transform is not None:
-            self.replay_transform.start(None if deadline is None else deadline - time.perf_counter())
+            remaining = None if deadline is None else deadline - time.perf_counter()
+            if self.is_distributed and remaining is not None:
+                remaining_tensor = torch.tensor(remaining, device=self.device, dtype=torch.float64)
+                dist.all_reduce(remaining_tensor, op=dist.ReduceOp.MIN)
+                remaining = remaining_tensor.item()
+            self.replay_transform.start(remaining)
         for it in range(start_it, total_it):
-            if deadline is not None and time.perf_counter() >= deadline:
+            if self._budget_expired(deadline):
                 break
             collect_time = learn_time = 0.0
             totals, counts = {}, {}
             for _ in range(self.cfg["num_steps_per_env"]):
                 start = time.perf_counter()
-                if deadline is not None and start >= deadline:
+                if self._budget_expired(deadline):
                     break
                 if self.replay_transform is not None:
                     self.replay_transform.before_collection(self.collection_steps)
@@ -111,7 +175,7 @@ class OffPolicyRunner:
                     totals[key] = totals.get(key, 0.0) + value
                     counts[key] = counts.get(key, 0) + 1
                 with torch.no_grad():
-                    if self.replay is None or self.replay.size < self.cfg["warmup_transitions"]:
+                    if not self._replay_ready():
                         actions = (
                             torch.rand(self.env.num_envs, self.env.num_actions, device=self.device) * 2 - 1
                         ) * self.alg.action_support
@@ -167,14 +231,18 @@ class OffPolicyRunner:
                     self.collection_steps += 1
                 collect_time += time.perf_counter() - start
                 start = time.perf_counter()
-                if self.replay.size >= self.cfg["warmup_transitions"]:
+                if self._replay_ready():
                     for _ in range(self.cfg["updates_per_step"]):
-                        if deadline is not None and time.perf_counter() >= deadline:
+                        if self._budget_expired(deadline):
                             break
                         batch = self.replay.sample(self.cfg["batch_size"])
                         if self.replay_transform is not None:
                             batch = self.replay_transform.process_batch(batch)
                         metrics = self.alg.update(batch)
+                        if self.is_distributed:
+                            values = torch.stack([value.float().reshape(()) for value in metrics.values()])
+                            dist.all_reduce(values, op=dist.ReduceOp.SUM)
+                            metrics = dict(zip(metrics, values / self.gpu_world_size))
                         for key, value in metrics.items():
                             if not torch.isfinite(value).all():
                                 raise RuntimeError(f"Nonfinite FlashSAC metric: {key}")
@@ -214,6 +282,8 @@ class OffPolicyRunner:
 
     def save(self, path: str, infos: dict | None = None) -> None:
         """Save learner state; replay and simulator continuation are not included."""
+        if self.logger.disable_logs:
+            return
         state = self.alg.save()
         state.update(iter=self.current_learning_iteration, collection_steps=self.collection_steps, infos=infos)
         torch.save(state, path)
@@ -230,6 +300,9 @@ class OffPolicyRunner:
         self.replay = None
         self.alg.reward_return = torch.zeros(1, device=self.device)
         self.alg.noise_count.zero_()
+        if self.is_distributed:
+            # Resume uses fresh replay/trajectories; avoid identical rank-zero RNG streams.
+            torch.manual_seed(self.cfg.get("seed", 0) + self.gpu_global_rank)
         warnings.warn(
             "FlashSAC restored with fresh replay and environment trajectories; this is not exact continuation.",
             stacklevel=2,

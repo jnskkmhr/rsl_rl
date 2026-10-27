@@ -6,7 +6,7 @@ They require explicitly supplied policy and critic models. The reference network
 provided by `compositional_rsl_rl`, not by the core package.
 Installing the compositional FlashSAC branch automatically installs its pinned revision of this fork.
 For core development, install this checkout with `python -m pip install -e /path/to/rsl_rl`.
-The local version `5.5.1+flashsac.2` identifies this development fork, not an upstream release.
+The local version `5.5.1+flashsac.3` identifies this development fork, not an upstream release.
 
 ## Source and numerical contract
 
@@ -175,3 +175,33 @@ putting task-specific reward logic into the algorithm.
 learner. `learn(process_started=...)` can include environment setup in the budget;
 otherwise the clock starts at `learn`. `save_interval_updates` overrides periodic
 iteration-based saves and counts learner updates. These options default to disabled.
+
+
+## Distributed training
+
+Launch one process per GPU with `torchrun`. `OffPolicyRunner` uses `WORLD_SIZE`,
+`RANK` and `LOCAL_RANK`, initializes NCCL, and requires each process to use its
+local CUDA device. CPU/Gloo is supported for distributed contract tests.
+
+Every rank owns its environments and replay, but trains the same policy: online
+and target models are broadcast initially, and actor, critic, temperature and
+compositional auxiliary gradients are averaged before optimizer steps. Scaled AMP
+gradients are reduced before unscaling so overflow/skip decisions agree.
+Reward normalization combines return moments and maxima across all ranks.
+
+Environment count, `batch_size`, `warmup_transitions`, `replay_capacity`, and
+`replay_max_bytes` are **per rank**. Thus the effective minibatch is
+`world_size * batch_size` before symmetry augmentation. `updates_per_step` and
+curriculum steps count synchronized vector collections, not total transitions.
+Updates start only after every local replay has warmed up. Keep the algorithm
+configuration and iteration count identical across ranks. Wall-time stopping is
+collective: if any rank reaches its deadline, all ranks stop together.
+
+Batch normalization uses local minibatch statistics. Floating running buffers are
+averaged after updates, and integer counters take the maximum, so inference and
+checkpoints use identical state on all ranks. This is not global-batch SyncBatchNorm.
+Only rank zero writes logs and checkpoints; learner metrics are averaged across
+ranks, while episode metrics follow RSL-RL's rank-zero logging convention.
+Resume restores learner state with fresh local replay and rank-specific random
+streams, as with single-GPU fresh-replay resume. Time-based environment curricula
+must synchronize their own clocks; the Agile task's replay extension does so.
