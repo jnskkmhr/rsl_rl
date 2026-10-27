@@ -456,9 +456,6 @@ def test_runner_relabels_accumulated_components_with_current_weights(monkeypatch
         def __init__(self, env: AutoResetEnv) -> None:
             self.weight = 1.0
 
-        def start(self, remaining_seconds: float | None) -> None:
-            pass
-
         def before_collection(self, step: int) -> None:
             self.weight = 1.0 if step < 4 else 3.0
 
@@ -490,35 +487,12 @@ def test_runner_relabels_accumulated_components_with_current_weights(monkeypatch
     assert "applied_weight" not in runner.replay.storage
 
 
-def test_runner_deadline_stops_updates_and_checkpoints_count_updates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A deadline reached inside a collection's updates still saves the final learner."""
-    import rsl_rl.runners.off_policy_runner as runner_module
-
-    clock = [100.0]
-    monkeypatch.setattr(runner_module.time, "perf_counter", lambda: clock[0])
-    env = AutoResetEnv()
-    step = env.step
-
-    def timed_step(actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
-        clock[0] += 0.1
-        return step(actions)
-
-    monkeypatch.setattr(env, "step", timed_step)
+def test_runner_stops_and_saves_by_iteration(tmp_path: Path) -> None:
+    """Collection and checkpoints count iterations even with several updates per step."""
     cfg = config()
-    cfg.update(n_step=1, warmup_transitions=2, max_time_s=1.0, save_interval_updates=2, logger="tensorboard")
-    runner = OffPolicyRunner(env, cfg, log_dir=str(tmp_path))
-    update = runner.alg.update
-
-    def timed_update(batch: TensorDict) -> dict[str, torch.Tensor]:
-        result = update(batch)
-        clock[0] += 0.3
-        return result
-
-    monkeypatch.setattr(runner.alg, "update", timed_update)
-    runner.learn(100, process_started=100.0)
-    assert runner.collection_steps == 2
-    assert runner.alg.update_step == 3
-    assert (tmp_path / "model_update_2.pt").is_file()
-    assert (tmp_path / "model_2.pt").is_file()
+    cfg.update(n_step=1, warmup_transitions=2, updates_per_step=3, save_interval=2, logger="tensorboard")
+    runner = OffPolicyRunner(AutoResetEnv(), cfg, log_dir=str(tmp_path))
+    runner.learn(5)
+    assert runner.current_learning_iteration == runner.collection_steps == 5
+    assert runner.alg.update_step == 15
+    assert {path.name for path in tmp_path.glob("model*.pt")} == {"model_2.pt", "model_4.pt", "model_5.pt"}

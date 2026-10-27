@@ -6,7 +6,7 @@ They require explicitly supplied policy and critic models. The reference network
 provided by `compositional_rsl_rl`, not by the core package.
 Installing the compositional FlashSAC branch automatically installs its pinned revision of this fork.
 For core development, install this checkout with `python -m pip install -e /path/to/rsl_rl`.
-The local version `5.5.1+flashsac.3` identifies this development fork, not an upstream release.
+The local version `5.5.1+flashsac.4` identifies this development fork, not an upstream release.
 
 ## Source and numerical contract
 
@@ -160,22 +160,18 @@ steps. A full resume restores current values, then advances at the next collecti
 export retain the saved action bound. Schedule configuration must match for optimizer resume;
 weights-only transfer may use a new schedule. With no curriculum configured, existing behavior is unchanged.
 
-## Replay curricula and time budgets
+## Replay curricula and training iterations
 
-`OffPolicyRunner` accepts optional `replay_cfg`, `max_time_s`, and
-`save_interval_updates` settings. `replay_cfg.class_name` resolves a transform
-constructed with the environment and remaining configuration arguments. The
-transform starts with the remaining wall-time budget, runs before each collection,
-adds transition fields, and transforms sampled batches. Its `sum_keys` identifies
-fields that replay must accumulate with the same n-step discount and episode
-boundaries as rewards. This supports current-weight reward relabeling without
-putting task-specific reward logic into the algorithm.
+`OffPolicyRunner` accepts an optional `replay_cfg`. Its `class_name` resolves a
+transform constructed with the environment and remaining configuration arguments.
+The transform runs before each collection, adds transition fields, and transforms
+sampled batches. Its `sum_keys` identifies fields that replay must accumulate with
+the same n-step discount and episode boundaries as rewards. This supports
+current-weight reward relabeling without task-specific logic in the algorithm.
 
-`max_time_s` stops collection and updates at the deadline and still saves the final
-learner. `learn(process_started=...)` can include environment setup in the budget;
-otherwise the clock starts at `learn`. `save_interval_updates` overrides periodic
-iteration-based saves and counts learner updates. These options default to disabled.
-
+`learn(num_learning_iterations)` controls training length. `save_interval` counts
+training iterations, independently of `updates_per_step`, and the final learner
+is also saved. There is no wall-time stopping budget or update-based save interval.
 
 ## Distributed training
 
@@ -194,8 +190,7 @@ Environment count, `batch_size`, `warmup_transitions`, `replay_capacity`, and
 `world_size * batch_size` before symmetry augmentation. `updates_per_step` and
 curriculum steps count synchronized vector collections, not total transitions.
 Updates start only after every local replay has warmed up. Keep the algorithm
-configuration and iteration count identical across ranks. Wall-time stopping is
-collective: if any rank reaches its deadline, all ranks stop together.
+configuration and iteration count identical across ranks.
 
 Batch normalization uses local minibatch statistics. Floating running buffers are
 averaged after updates, and integer counters take the maximum, so inference and

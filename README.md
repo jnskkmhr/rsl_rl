@@ -1,6 +1,6 @@
 # RSL-RL
 
-This checkout adds native FlashSAC as the internal fork build `5.5.1+flashsac.3`.
+This checkout adds native FlashSAC as the internal fork build `5.5.1+flashsac.4`.
 See [FlashSAC usage and compatibility](docs/flash_sac.md); upstream PPO and distillation remain available.
 
 **RSL-RL** is a GPU-accelerated, lightweight learning library for robotics research. Its compact design allows

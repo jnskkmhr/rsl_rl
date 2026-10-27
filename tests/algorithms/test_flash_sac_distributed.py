@@ -10,7 +10,6 @@ import torch.multiprocessing as mp
 from datetime import timedelta
 from pathlib import Path
 from tensordict import TensorDict
-from unittest.mock import patch
 
 import pytest
 
@@ -70,21 +69,6 @@ def _run_rank(rank: int, rendezvous: str, output: str, device_type: str) -> None
         runner.save(str(Path(output) / f"checkpoint-{rank}.pt"))
         torch.save(runner.alg.save(), Path(output) / f"state-{rank}.pt")
 
-        # A deadline reached only on rank zero must stop every rank together.
-        clock = [100.0]
-        env = RankEnv()
-        step = env.step
-
-        def timed_step(actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
-            clock[0] += 0.25 if rank == 0 else 0.01
-            return step(actions)
-
-        env.step = timed_step
-        cfg["max_time_s"] = 1.0
-        runner = OffPolicyRunner(env, cfg, device=device)
-        with patch("time.perf_counter", lambda: clock[0]):
-            runner.learn(100, process_started=100.0)
-        torch.save((runner.collection_steps, runner.alg.update_step), Path(output) / f"deadline-{rank}.pt")
     finally:
         dist.destroy_process_group()
 
@@ -94,7 +78,7 @@ def _run_rank(rank: int, rendezvous: str, output: str, device_type: str) -> None
     ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two GPUs"))],
 )
 def test_distributed_flash_sac_shares_updates_statistics_and_stopping(tmp_path: Path, device_type: str) -> None:
-    """Different rank data must produce one learner, one deadline and one checkpoint writer."""
+    """Different rank data must produce one learner, the requested iterations and one checkpoint writer."""
     ctx = mp.get_context("spawn")
     rendezvous = "file://" + str(tmp_path / "rendezvous")
     processes = [
@@ -119,6 +103,3 @@ def test_distributed_flash_sac_shares_updates_statistics_and_stopping(tmp_path: 
         torch.testing.assert_close(states[0]["statistics"][key], states[1]["statistics"][key])
     assert (tmp_path / "checkpoint-0.pt").exists()
     assert not (tmp_path / "checkpoint-1.pt").exists()
-    clocks = [torch.load(tmp_path / f"deadline-{rank}.pt", weights_only=False, map_location="cpu") for rank in range(2)]
-    assert clocks[0] == clocks[1]
-    assert clocks[0][0] == 4

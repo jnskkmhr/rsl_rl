@@ -167,7 +167,6 @@ class Logger:
         print_minimal: bool = False,
         width: int = 80,
         pad: int = 40,
-        remaining_time: float | None = None,
     ) -> None:
         """Log the training metrics to the logging service and print them to the console.
 
@@ -271,7 +270,7 @@ class Logger:
             # Print footer
             done_it = it + 1 - start_it
             remaining_it = total_it - start_it - done_it
-            eta = self.tot_time / done_it * remaining_it if remaining_time is None else remaining_time
+            eta = self.tot_time / done_it * remaining_it
             log_string += (
                 f"""{"-" * width}\n"""
                 f"""{"Iteration time:":>{pad}} {iteration_time:.2f}s\n"""
