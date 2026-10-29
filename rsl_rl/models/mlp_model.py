@@ -13,6 +13,7 @@ from tensordict import TensorDict
 
 from rsl_rl.modules import MLP, EmpiricalNormalization, HiddenState
 from rsl_rl.modules.distribution import Distribution
+from rsl_rl.modules.mlp import EnsembleMLP
 from rsl_rl.utils import resolve_class, unpad_trajectories
 
 
@@ -38,6 +39,8 @@ class MLPModel(nn.Module):
         obs_normalization: bool = False,
         distribution_cfg: dict | None = None,
         extra_input_dim: int = 0,
+        layer_norm: bool = False,
+        num_ensembles: int = 1,
     ) -> None:
         """Initialize the MLP-based model.
 
@@ -52,6 +55,8 @@ class MLPModel(nn.Module):
             distribution_cfg: Configuration dictionary for the output distribution. If provided, the model outputs
                 stochastic values sampled from the distribution.
             extra_input_dim: Width of an additional runtime input, such as a Q critic's action.
+            layer_norm: Apply LayerNorm before each hidden activation.
+            num_ensembles: Number of independently parameterized MLPs.
         """
         super().__init__()
 
@@ -78,11 +83,19 @@ class MLPModel(nn.Module):
             mlp_output_dim = output_dim
 
         # MLP
-        self.mlp = MLP(self._get_latent_dim(), mlp_output_dim, hidden_dims, activation)
+        if num_ensembles < 1:
+            raise ValueError("num_ensembles must be positive.")
+        args = (self._get_latent_dim(), mlp_output_dim, hidden_dims, activation)
+        self.mlp = (
+            MLP(*args, layer_norm=layer_norm)
+            if num_ensembles == 1
+            else EnsembleMLP(num_ensembles, *args, layer_norm=layer_norm)
+        )
 
         # Initialize distribution-specific MLP weights
         if self.distribution is not None:
-            self.distribution.init_mlp_weights(self.mlp)
+            for mlp in self.mlp.members if isinstance(self.mlp, EnsembleMLP) else [self.mlp]:
+                self.distribution.init_mlp_weights(mlp)
 
     def forward(
         self,

@@ -31,6 +31,7 @@ class MLP(nn.Sequential):
         hidden_dims: tuple[int, ...] | list[int],
         activation: str = "elu",
         last_activation: str | None = None,
+        layer_norm: bool = False,
     ) -> None:
         """Initialize the MLP.
 
@@ -41,6 +42,7 @@ class MLP(nn.Sequential):
                 inferred from the input dimension.
             activation: Activation function.
             last_activation: Activation function of the last layer. None results in a linear last layer.
+            layer_norm: Normalize each hidden layer before its activation.
         """
         super().__init__()
 
@@ -55,6 +57,8 @@ class MLP(nn.Sequential):
         previous_dim = input_dim
         for hidden_dim in hidden_dims_processed:
             layers.append(nn.Linear(previous_dim, hidden_dim))
+            if layer_norm:
+                layers.append(nn.LayerNorm(hidden_dim))
             layers.append(activation_mod)
             previous_dim = hidden_dim
 
@@ -92,3 +96,26 @@ class MLP(nn.Sequential):
         for layer in self:
             x = layer(x)
         return x
+
+
+class EnsembleMLP(nn.Module):
+    """Independent MLPs with batch-first outputs [batch, ensemble, ...]."""
+
+    def __init__(
+        self,
+        num_ensembles: int,
+        input_dim: int,
+        output_dim: int | tuple[int, ...] | list[int],
+        hidden_dims: tuple[int, ...] | list[int],
+        activation: str = "elu",
+        layer_norm: bool = False,
+    ) -> None:
+        """Construct independently initialized ensemble members."""
+        super().__init__()
+        self.members = nn.ModuleList([
+            MLP(input_dim, output_dim, hidden_dims, activation, layer_norm=layer_norm) for _ in range(num_ensembles)
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Evaluate every member on the same input."""
+        return torch.stack([member(x) for member in self.members], dim=1)

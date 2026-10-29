@@ -61,3 +61,17 @@ If you use RSL-RL in your research, please cite the [paper](https://arxiv.org/ab
   year={2025}
 }
 ```
+
+## Holosoma FastSAC branch
+
+`FastSAC` uses Holosoma's independent distributional critic targets, mean-Q actor
+objective, AdamW optimizers, IID exploration and empirical observation normalization.
+`FlashSAC` remains available for comparisons. Both use the native off-policy runner
+and its replay implementation. Timeouts bootstrap from final observations; true
+terminations do not. Replay returns stop at the first episode boundary and never
+wrap into stale rewards. Observation normalization uses the correct pooled variance.
+
+The `jnskkmhr/holosoma` branches of this library and `compositional_rsl_rl` must be
+used together. The compositional library provides `CompositionalFastSACAlgorithmCfg`
+and `CompositionalFastSACRunnerCfg`, plus a head configuration example in its README.
+No IsaacLab dependency pins or task registries are changed by these branches.

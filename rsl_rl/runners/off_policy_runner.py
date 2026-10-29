@@ -11,6 +11,7 @@ import time
 import torch
 import torch.distributed as dist
 import warnings
+from collections.abc import Iterator
 from math import prod as math_prod
 from pathlib import Path
 from tensordict import TensorDict
@@ -38,6 +39,19 @@ class OffPolicyRunner:
         self.cfg = copy.deepcopy(train_cfg)
         self.device = device
         self._configure_multi_gpu()
+        if self.cfg.get("batch_size_is_global", False):
+            if self.cfg["batch_size"] % self.gpu_world_size:
+                raise ValueError("Global batch_size must be divisible by the number of ranks.")
+            self.cfg["batch_size"] //= self.gpu_world_size
+        if self.cfg.get("replay_steps_per_env") is not None:
+            steps = self.cfg["replay_steps_per_env"]
+            if type(steps) is not int or steps < 1:
+                raise ValueError("replay_steps_per_env must be a positive integer.")
+            self.cfg["replay_capacity"] = steps * env.num_envs
+        if self.cfg.get("learning_starts") is not None:
+            starts = self.cfg["learning_starts"]
+            if type(starts) is not int or starts < 0:
+                raise ValueError("learning_starts must be a nonnegative vector-step count.")
         for key in (
             "num_steps_per_env",
             "updates_per_step",
@@ -104,9 +118,17 @@ class OffPolicyRunner:
             global_rank=self.gpu_global_rank, local_rank=self.gpu_local_rank, world_size=self.gpu_world_size
         )
 
+    def _sample_batches(self) -> Iterator[TensorDict]:
+        """Yield replay minibatches, allowing learners to choose batched or sequential preparation."""
+        for _ in range(self.cfg["updates_per_step"]):
+            batch = self.replay.sample(self.cfg["batch_size"])
+            yield self.replay_transform.process_batch(batch) if self.replay_transform is not None else batch
+
     def _replay_ready(self) -> bool:
         """Begin updates only when every rank's local n-step replay has warmed up."""
         ready = self.replay is not None and self.replay.size >= self.cfg["warmup_transitions"]
+        if self.cfg.get("learning_starts") is not None:
+            ready = ready and self.collection_steps > self.cfg["learning_starts"] + 1
         if self.is_distributed:
             flag = torch.tensor(int(ready), device=self.device)
             dist.all_reduce(flag, op=dist.ReduceOp.MIN)
@@ -138,7 +160,7 @@ class OffPolicyRunner:
                     totals[key] = totals.get(key, 0.0) + value
                     counts[key] = counts.get(key, 0) + 1
                 with torch.no_grad():
-                    if not self._replay_ready():
+                    if getattr(self.alg, "random_warmup", True) and not self._replay_ready():
                         actions = (
                             torch.rand(self.env.num_envs, self.env.num_actions, device=self.device) * 2 - 1
                         ) * self.alg.action_support
@@ -195,11 +217,7 @@ class OffPolicyRunner:
                 collect_time += time.perf_counter() - start
                 start = time.perf_counter()
                 if self._replay_ready():
-                    for _ in range(self.cfg["updates_per_step"]):
-                        batch = self.replay.sample(self.cfg["batch_size"])
-                        if self.replay_transform is not None:
-                            batch = self.replay_transform.process_batch(batch)
-                        metrics = self.alg.update(batch)
+                    for metrics in self.alg.update_batches(self._sample_batches()):
                         if self.is_distributed:
                             values = torch.stack([value.float().reshape(()) for value in metrics.values()])
                             dist.all_reduce(values, op=dist.ReduceOp.SUM)

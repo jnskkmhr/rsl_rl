@@ -327,11 +327,14 @@ class HeteroscedasticGaussianDistribution(GaussianDistribution):
 class SquashedGaussianDistribution(HeteroscedasticGaussianDistribution):
     """State-dependent Gaussian with smoothly bounded log scale and a tanh transform."""
 
-    def __init__(self, output_dim: int, log_std_min: float = -10.0, log_std_max: float = 2.0) -> None:
+    def __init__(
+        self, output_dim: int, log_std_min: float = -10.0, log_std_max: float = 2.0, zero_init_output: bool = False
+    ) -> None:
         """Configure the pre-transform log standard deviation bounds."""
         Distribution.__init__(self, output_dim)
         if not math.isfinite(log_std_min) or not math.isfinite(log_std_max) or log_std_min >= log_std_max:
             raise ValueError("Log standard deviation bounds must be finite and strictly increasing.")
+        self.zero_init_output = zero_init_output
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
         self._distribution: Normal | None = None
@@ -380,7 +383,11 @@ class SquashedGaussianDistribution(HeteroscedasticGaussianDistribution):
         return -(self._distribution.log_prob(raw) - correction).sum(dim=-1)
 
     def init_mlp_weights(self, mlp: nn.Module) -> None:
-        """Retain the selected network's initialization for both predicted parameters."""
+        """Optionally start with zero means and the midpoint log standard deviation."""
+        if self.zero_init_output:
+            linear = [module for module in mlp.modules() if isinstance(module, nn.Linear)][-1]
+            nn.init.zeros_(linear.weight)
+            nn.init.zeros_(linear.bias)
 
 
 class CategoricalValueDistribution(Distribution):

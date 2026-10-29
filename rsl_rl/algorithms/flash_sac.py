@@ -13,7 +13,7 @@ import copy
 import math
 import torch
 import torch.distributed as dist
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from tensordict import TensorDict
 from torch import nn
 
@@ -141,7 +141,7 @@ class FlashSAC:
             if name == "target_critic":
                 continue
             parameters = [p for p in model.parameters() if p.requires_grad]
-            self.optimizers[name] = torch.optim.Adam(parameters, lr=learning_rate, fused=self.device.type == "cuda")
+            self.optimizers[name] = self.make_optimizer(name, parameters)
             self.schedulers[name] = torch.optim.lr_scheduler.LambdaLR(self.optimizers[name], self._learning_rate_factor)
         for model in (self.actor, self.critic, self.target_critic):
             normalize_parameters(model)
@@ -158,6 +158,15 @@ class FlashSAC:
         self.reward_var = torch.ones(1, device=self.device)
         self.reward_count = torch.tensor(0.0, device=self.device)
         self.update_curriculum(0)
+
+    def make_optimizer(self, name: str, parameters: Iterable[nn.Parameter]) -> torch.optim.Optimizer:
+        """Construct the optimizer for a model's explicitly owned parameters."""
+        return torch.optim.Adam(parameters, lr=self.initial_learning_rate, fused=self.device.type == "cuda")
+
+    def update_batches(self, batches: Iterable[TensorDict]) -> Iterator[dict[str, torch.Tensor]]:
+        """Update from replay minibatches collected after one vector step."""
+        for batch in batches:
+            yield self.update(batch)
 
     @property
     def models(self) -> dict[str, nn.Module]:
