@@ -519,3 +519,32 @@ def test_runner_handles_undefined_terminal_state_without_losing_timeout_bootstra
     assert rows["terminated"].any()
     assert rows["truncated"].any()
     assert torch.isfinite(runner.get_inference_policy()(runner.env.get_observations())).all()
+
+
+def test_resume_refills_replay_with_trained_policy_before_updates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cold replay restart must not discard the trained collection policy."""
+    runner = OffPolicyRunner(AutoResetEnv(), config())
+    runner.learn(6)
+    checkpoint = tmp_path / "model.pt"
+    runner.save(str(checkpoint))
+    resumed = OffPolicyRunner(AutoResetEnv(), config())
+    resumed.load(str(checkpoint))
+    original_act = resumed.alg.act
+    policy_actions = []
+
+    def act(obs: TensorDict) -> torch.Tensor:
+        actions = original_act(obs)
+        policy_actions.append(actions.clone())
+        return actions
+
+    monkeypatch.setattr(resumed.alg, "act", act)
+    before = resumed.alg.update_step
+    resumed.learn(1)
+    assert len(policy_actions) == 1
+    assert torch.equal(resumed.replay.pending[0]["actions"], policy_actions[0])
+    assert resumed.alg.update_step == before
+    resumed.learn(3)
+    assert len(policy_actions) == 4
+    assert resumed.alg.update_step == before + config()["updates_per_step"]

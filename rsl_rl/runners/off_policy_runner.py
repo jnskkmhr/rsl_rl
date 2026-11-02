@@ -160,7 +160,11 @@ class OffPolicyRunner:
                     totals[key] = totals.get(key, 0.0) + value
                     counts[key] = counts.get(key, 0) + 1
                 with torch.no_grad():
-                    if getattr(self.alg, "random_warmup", True) and not self._replay_ready():
+                    if (
+                        getattr(self.alg, "random_warmup", True)
+                        and self.alg.update_step == 0
+                        and not self._replay_ready()
+                    ):
                         actions = (
                             torch.rand(self.env.num_envs, self.env.num_actions, device=self.device) * 2 - 1
                         ) * self.alg.action_support
