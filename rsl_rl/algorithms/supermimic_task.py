@@ -115,6 +115,28 @@ class DifferentiableTask:
         """Build privileged value features for the synthetic critic observation set."""
         raise NotImplementedError
 
+    def critic_obs_with_history(
+        self,
+        state: State,
+        goal: torch.Tensor,
+        context: torch.Tensor,
+        prev_actions: torch.Tensor,
+        history: torch.Tensor,
+    ) -> torch.Tensor:
+        """Build value inputs, optionally using the same observation history as the actor."""
+        return self.critic_obs(state, goal, context, prev_actions)
+
+    def post_transition(
+        self,
+        state: State,
+        next_state: State,
+        actions: torch.Tensor,
+        prev_actions: torch.Tensor,
+        labels: torch.Tensor | None,
+    ) -> State:
+        """Update analytic transition memory, including action-dependent task state."""
+        return self.post_dynamics(state, next_state, labels)
+
     def reward(
         self,
         state: State,

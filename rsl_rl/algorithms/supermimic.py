@@ -304,7 +304,7 @@ class SuperMimic:
                 else None
             )
         labels = torch.sigmoid(logits.float()) if logits is not None else None
-        return self.task.post_dynamics(state, raw_next, labels), logits, labels
+        return self.task.post_transition(state, raw_next, actions, previous_actions, labels), logits, labels
 
     def _fit_world_model(self) -> dict[str, torch.Tensor]:
         """Fit autoregressive physical successors and event labels on valid replay positions."""
@@ -355,7 +355,7 @@ class SuperMimic:
         rewards, terminals, features = [], [], []
         with _frozen(self.world_model, self.critic):
             for _ in range(self.horizon):
-                features.append(self.task.critic_obs(state, goal, context, previous))
+                features.append(self.task.critic_obs_with_history(state, goal, context, previous, history))
                 with torch.autocast(
                     torch.device(self.device).type, dtype=torch.bfloat16, enabled=self.use_mixed_precision
                 ):
@@ -368,7 +368,7 @@ class SuperMimic:
                 frame = self.task.add_noise(self.task.actor_obs(successor, goal, context, previous))
                 history = torch.cat((history[:, 1:], frame[:, None]), dim=1)
                 state = successor
-            features.append(self.task.critic_obs(state, goal, context, previous))
+            features.append(self.task.critic_obs_with_history(state, goal, context, previous, history))
             reward, terminal = torch.stack(rewards), torch.stack(terminals)
             alive = torch.cumprod(1 - terminal, dim=0)
             weights = (
@@ -594,7 +594,9 @@ class SuperMimic:
             observation_set("context"),
         )
         actor_obs, actor_goal = task.actor_obs(state, goal, context, previous), task.actor_goal(state, goal)
-        critic_features = task.critic_obs(state, goal, context, previous)
+        history_length = cfg.get("history_length", (cfg.get("actor") or {}).get("history_length", 5))
+        critic_history = actor_obs[:, None].expand(-1, history_length, -1)
+        critic_features = task.critic_obs_with_history(state, goal, context, previous, critic_history)
         dynamics_context = task.dynamics_context(state, context, previous)
         if observation_set("labels").shape[-1] != task.num_labels:
             raise ValueError("Label observation width must equal task.num_labels.")

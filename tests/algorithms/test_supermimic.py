@@ -549,3 +549,31 @@ def test_nonfinite_timeout_successor_is_rejected() -> None:
     extras["time_outs"][0] = True
     with pytest.raises(ValueError, match="true terminal successor"):
         learner.process_env_step(obs, reward, done, extras)
+
+
+def test_task_receives_actor_history_and_transition_actions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """History-conditioned critics and analytic action memory work in fitting and actor rollouts."""
+    seen = []
+
+    def critic_history(self, state, goal, context, previous, history):
+        assert history.shape[-2:] == (2, 2)
+        seen.append(history.detach().clone())
+        return torch.cat((self.critic_obs(state, goal, context, previous), history.flatten(-2)), -1)
+
+    def transition(self, state, successor, action, previous, labels):
+        return (successor[0] + action - previous[..., -1, :],)
+
+    monkeypatch.setattr(ScalarTask, "critic_obs_with_history", critic_history)
+    monkeypatch.setattr(ScalarTask, "post_transition", transition)
+    env = ScalarEnv()
+    learner = _learner(env)
+    state, context, previous = (torch.zeros(4, 1),), torch.zeros(4, 1), torch.zeros(4, 2, 1)
+    action = torch.ones(4, 1, requires_grad=True)
+    raw = learner.world_model(state, action, learner.task.dynamics_context(state, context, previous))
+    successor, _, _ = learner._predict(state, action, context, previous)
+    torch.testing.assert_close(successor[0], raw[0] + action)
+    torch.testing.assert_close(torch.autograd.grad((successor[0] - raw[0]).sum(), action)[0], torch.ones_like(action))
+    _collect(learner, env, 4)
+    learner._fit_world_model()
+    assert learner._fit_policy()["policy_grad_norm"] > 0
+    assert len(seen) == learner.horizon + 2  # construction plus rollout/bootstrap
