@@ -496,3 +496,26 @@ def test_runner_stops_and_saves_by_iteration(tmp_path: Path) -> None:
     assert runner.current_learning_iteration == runner.collection_steps == 5
     assert runner.alg.update_step == 15
     assert {path.name for path in tmp_path.glob("model*.pt")} == {"model_2.pt", "model_4.pt", "model_5.pt"}
+
+
+@pytest.mark.parametrize("boundary", ["terminated", "truncated"])
+def test_runner_handles_undefined_terminal_state_without_losing_timeout_bootstrap(boundary: str) -> None:
+    """Reset observations cannot conceal an invalid timeout, but a death needs no successor value."""
+
+    class UndefinedFinalEnv(AutoResetEnv):
+        def step(self, actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
+            obs, rewards, dones, extras = super().step(actions)
+            extras["final_obs"]["policy"][extras[boundary]] = float("nan")
+            return obs, rewards, dones, extras
+
+    runner = OffPolicyRunner(UndefinedFinalEnv(), config())
+    if boundary == "truncated":
+        with pytest.raises(ValueError, match="bootstrapped truncation"):
+            runner.learn(6)
+        return
+    runner.learn(6)
+    rows = runner.replay.storage[: runner.replay.size]
+    assert torch.isfinite(rows["next_observations", "policy"]).all()
+    assert rows["terminated"].any()
+    assert rows["truncated"].any()
+    assert torch.isfinite(runner.get_inference_policy()(runner.env.get_observations())).all()

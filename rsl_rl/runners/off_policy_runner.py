@@ -186,7 +186,20 @@ class OffPolicyRunner:
                         if not torch.all(mask[dones.bool()]):
                             raise ValueError("Missing final observations for reset environments.")
                         final = TensorDict(extras["final_obs"], batch_size=[self.env.num_envs]).to(self.device)
-                        successors[dones.bool()] = final[dones.bool()]
+                        finite = torch.ones(self.env.num_envs, dtype=torch.bool, device=self.device)
+                        for value in final.values(True, True):
+                            finite &= torch.isfinite(value).reshape(self.env.num_envs, -1).all(dim=-1)
+                        if ((~finite) & truncated & ~terminated).any():
+                            raise ValueError("Nonfinite final observations for a bootstrapped truncation.")
+                        # A true terminal has no successor value. A simulator may expose an
+                        # undefined final state after a failed solve; keep the finite reset
+                        # observation in those rows rather than contaminating network batches.
+                        # Valid terminal observations and all timeout successors are unchanged.
+                        use_final = dones.bool() & finite
+                        successors[use_final] = final[use_final]
+                        key = "replay/invalid_terminal_observations"
+                        totals[key] = totals.get(key, 0.0) + ((~finite) & terminated).float().mean().item()
+                        counts[key] = counts.get(key, 0) + 1
                     transition = TensorDict(
                         dict(
                             observations=obs,
