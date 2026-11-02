@@ -555,12 +555,26 @@ def test_task_receives_actor_history_and_transition_actions(monkeypatch: pytest.
     """History-conditioned critics and analytic action memory work in fitting and actor rollouts."""
     seen = []
 
-    def critic_history(self, state, goal, context, previous, history):
+    def critic_history(
+        self: ScalarTask,
+        state: State,
+        goal: torch.Tensor,
+        context: torch.Tensor,
+        previous: torch.Tensor,
+        history: torch.Tensor,
+    ) -> torch.Tensor:
         assert history.shape[-2:] == (2, 2)
         seen.append(history.detach().clone())
         return torch.cat((self.critic_obs(state, goal, context, previous), history.flatten(-2)), -1)
 
-    def transition(self, state, successor, action, previous, labels):
+    def transition(
+        self: ScalarTask,
+        state: State,
+        successor: State,
+        action: torch.Tensor,
+        previous: torch.Tensor,
+        labels: torch.Tensor | None,
+    ) -> State:
         return (successor[0] + action - previous[..., -1, :],)
 
     monkeypatch.setattr(ScalarTask, "critic_obs_with_history", critic_history)
