@@ -8,4 +8,6 @@
 from .replay_storage import ReplayStorage
 from .rollout_storage import RolloutStorage
 
-__all__ = ["ReplayStorage", "RolloutStorage"]
+from .sequence_replay_buffer import SequenceReplayBuffer
+
+__all__ = ["ReplayStorage", "RolloutStorage", "SequenceReplayBuffer"]

@@ -18,7 +18,10 @@ from .mlp import MLP
 from .normalization import EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
 from .rnn import RNN, HiddenState
 
+from .world_model import WorldModel
+
 __all__ = [
+    "WorldModel",
     "CNN",
     "MLP",
     "RNN",

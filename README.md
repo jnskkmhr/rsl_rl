@@ -75,3 +75,20 @@ The `jnskkmhr/holosoma` branches of this library and `compositional_rsl_rl` must
 used together. The compositional library provides `CompositionalFastSACAlgorithmCfg`
 and `CompositionalFastSACRunnerCfg`, plus a head configuration example in its README.
 No IsaacLab dependency pins or task registries are changed by these branches.
+
+### SuperMimic (experimental branch)
+
+This branch ports [SuperMimic PR #255](https://github.com/leggedrobotics/rsl_rl/pull/255)
+from revision `b7ed5e55aec0f45b89e9410dcdf9fa7df01516ad`.
+`SuperMimic` uses the standard runner interaction loop, sequence replay, a learned
+physical world model, differentiable task rewards, and imagined actor/value updates.
+The environment must supply noise-free state/goal/context/label observation sets and
+`extras["final_obs_every_step"] = True` with physical successors captured before resets
+and external events. Invalid true-terminal successors are excluded from dynamics
+training; invalid continuing or timeout states fail explicitly.
+
+Torchrun supports one process per GPU across nodes. Actor, dynamics and critic
+parameters, gradients and observation moments synchronize; replay and actor histories
+remain local. World-model and policy batch sizes are global by default and must be
+divisible by world size. Replay capacity is per process. Checkpoints contain all three
+models and optimizers; replay is re-warmed after resume.

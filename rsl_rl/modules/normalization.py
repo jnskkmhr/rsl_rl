@@ -56,13 +56,15 @@ class EmpiricalNormalization(nn.Module):
             return
 
         count_x = torch.tensor(x.shape[0], dtype=self.count.dtype, device=self.count.device)  # type: ignore
-        var_x = torch.var(x, dim=0, unbiased=False, keepdim=True)
-        mean_x = torch.mean(x, dim=0, keepdim=True)
+        var_x = torch.var(x, dim=0, unbiased=False, keepdim=True) if x.shape[0] else torch.zeros_like(self._var)
+        mean_x = torch.mean(x, dim=0, keepdim=True) if x.shape[0] else torch.zeros_like(self._mean)
 
         if torch.distributed.is_initialized():
             # Compute the global mean first, then combine the local variances around that mean
             local_mean_x = mean_x
             torch.distributed.all_reduce(count_x)
+            if count_x == 0:
+                return
             mean_sum_x = mean_x * x.shape[0]
             torch.distributed.all_reduce(mean_sum_x)
             mean_x = mean_sum_x / count_x
@@ -70,12 +72,14 @@ class EmpiricalNormalization(nn.Module):
             torch.distributed.all_reduce(var_sum_x)
             var_x = var_sum_x / count_x
 
+        if count_x == 0:
+            return
         self.count += count_x
         rate = count_x / self.count
         delta_mean = mean_x - self._mean
         self._mean += rate * delta_mean
         self._var += rate * (var_x - self._var + delta_mean * (mean_x - self._mean))
-        self._std = torch.sqrt(self._var)
+        self._std.copy_(torch.sqrt(self._var))
 
     @torch.jit.unused
     def inverse(self, y: torch.Tensor) -> torch.Tensor:
