@@ -14,7 +14,7 @@ from tensordict import TensorDict
 import pytest
 
 from rsl_rl.algorithms.distillation import Distillation
-from rsl_rl.models import MLPModel
+from rsl_rl.models import MLPModel, RNNModel
 from rsl_rl.storage import RolloutStorage
 from tests.conftest import make_obs
 
@@ -145,6 +145,71 @@ class TestDistillationLoss:
 
         assert alg.student.obs_normalizer.count == NUM_ENVS * NUM_STEPS
         assert torch.allclose(alg.student.obs_normalizer.mean, expected_mean)
+
+    def test_update_keeps_recurrent_teacher_hidden_state(self) -> None:
+        """The teacher is not evaluated during the update, so its rollout memory should carry over unchanged."""
+        obs = make_obs(NUM_ENVS, OBS_DIM)
+        obs_groups = {"student": ["policy"], "teacher": ["policy"]}
+        student = MLPModel(obs, obs_groups, "student", NUM_ACTIONS, hidden_dims=[32])
+        teacher = RNNModel(obs, obs_groups, "teacher", NUM_ACTIONS, hidden_dims=[32], rnn_hidden_dim=16)
+        storage = RolloutStorage("distillation", NUM_ENVS, NUM_STEPS, obs, [NUM_ACTIONS])
+        alg = Distillation(student, teacher, storage, gradient_length=NUM_STEPS)
+
+        for _ in range(2):
+            for step in range(NUM_STEPS):
+                with torch.inference_mode():
+                    alg.act(obs)
+                    # Environment 0 is done in the middle of the rollout
+                    dones = torch.tensor([float(step == NUM_STEPS // 2), 0.0, 0.0, 0.0])
+                    alg.process_env_step(obs, torch.zeros(NUM_ENVS), dones, {})
+            hidden_state = [h.clone() for h in teacher.get_hidden_state()]
+            alg.update()
+            for h_before, h_after in zip(hidden_state, teacher.get_hidden_state()):
+                torch.testing.assert_close(h_after, h_before)
+
+
+class TestCheckpoint:
+    """Tests for distillation checkpoint selection and restoration."""
+
+    def test_resume_with_default_selection_and_fresh_optimizer(self) -> None:
+        """Full resume restores training state, while callers can explicitly skip the optimizer."""
+        source, obs, _storage = _make_distillation_setup()
+        _fill_distillation_storage(source, obs)
+        source.update()
+        checkpoint = source.save()
+        restored, _obs, _storage = _make_distillation_setup()
+
+        assert restored.load(checkpoint, load_cfg=None, strict=True)
+        assert restored.teacher_loaded
+        assert len(restored.optimizer.state) == len(source.optimizer.state) > 0
+        for name, value in source.student.state_dict().items():
+            torch.testing.assert_close(restored.student.state_dict()[name], value)
+        for name, value in source.teacher.state_dict().items():
+            torch.testing.assert_close(restored.teacher.state_dict()[name], value)
+
+        fresh, _obs, _storage = _make_distillation_setup()
+        load_cfg = fresh.get_default_load_cfg()
+        load_cfg["optimizer"] = False
+        assert fresh.load(checkpoint, load_cfg, strict=True)
+        assert not fresh.optimizer.state
+        for name, value in source.student.state_dict().items():
+            torch.testing.assert_close(fresh.student.state_dict()[name], value)
+
+    @pytest.mark.parametrize("load_cfg", [None, {"teacher": True}])
+    def test_load_rl_checkpoint_as_teacher(self, load_cfg: dict | None) -> None:
+        """RL checkpoints load only the teacher through detection or explicit selection."""
+        source, _obs, _storage = _make_distillation_setup()
+        checkpoint = {"actor_state_dict": source.teacher.state_dict()}
+        restored, _obs, _storage = _make_distillation_setup()
+        student_before = {name: value.clone() for name, value in restored.student.state_dict().items()}
+
+        assert not restored.load(checkpoint, load_cfg, strict=True)
+        assert restored.teacher_loaded
+        assert not restored.optimizer.state
+        for name, value in checkpoint["actor_state_dict"].items():
+            torch.testing.assert_close(restored.teacher.state_dict()[name], value)
+        for name, value in student_before.items():
+            torch.testing.assert_close(restored.student.state_dict()[name], value)
 
 
 class TestGradientBudgetWarning:

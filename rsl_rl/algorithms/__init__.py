@@ -9,7 +9,7 @@ from .distillation import Distillation
 from .fast_sac import FastSAC
 from .flash_sac import FlashSAC
 from .ppo import PPO
-
+from .sac import SAC
 from .supermimic import SuperMimic
 
-__all__ = ["PPO", "Distillation", "FastSAC", "FlashSAC", "SuperMimic"]
+__all__ = ["PPO", "SAC", "Distillation", "FastSAC", "FlashSAC", "SuperMimic"]

@@ -24,7 +24,12 @@ from rsl_rl.utils import (
 
 
 class Distillation:
-    """Distillation algorithm for training a student model to mimic a teacher model."""
+    """Distillation algorithm for training a student model to mimic a teacher model.
+
+    Reference:
+        - Ross et al. "A Reduction of Imitation Learning and Structured Prediction to No-Regret
+          Online Learning." arXiv preprint arXiv:1011.0686 (2011).
+    """
 
     student: MLPModel
     """The student model."""
@@ -81,7 +86,7 @@ class Distillation:
         # Add storage
         self.storage = storage
         self.transition = RolloutStorage.Transition()
-        self.last_hidden_states = (None, None)
+        self.last_student_hidden_state = None
 
         # Distillation parameters
         self.num_learning_epochs = num_learning_epochs
@@ -137,7 +142,6 @@ class Distillation:
 
     def compute_returns(self, obs: TensorDict) -> None:
         """No-op since distillation does not use return targets."""
-        # Not needed for distillation
         pass
 
     def update(self) -> dict[str, float]:
@@ -148,8 +152,7 @@ class Distillation:
         cnt = 0
 
         for epoch in range(self.num_learning_epochs):
-            self.student.reset(hidden_state=self.last_hidden_states[0])
-            self.teacher.reset(hidden_state=self.last_hidden_states[1])
+            self.student.reset(hidden_state=self.last_student_hidden_state)
             self.student.detach_hidden_state()
             for batch in self.storage.generator():
                 # Optionally use mixed precision for the forward pass and loss computation
@@ -181,11 +184,10 @@ class Distillation:
 
                 # Reset dones
                 self.student.reset(batch.dones.view(-1))
-                self.teacher.reset(batch.dones.view(-1))
                 self.student.detach_hidden_state(batch.dones.view(-1))
 
-        # Store the last hidden states for the next update
-        self.last_hidden_states = (self.student.get_hidden_state(), self.teacher.get_hidden_state())
+        # Store the last hidden state for the next update
+        self.last_student_hidden_state = self.student.get_hidden_state()
         self.student.detach_hidden_state()
 
         # Update the normalizer
@@ -222,18 +224,17 @@ class Distillation:
         }
         return saved_dict
 
+    def get_default_load_cfg(self) -> dict:
+        """Return the default selection for resuming this algorithm's own checkpoints."""
+        return {"student": True, "teacher": True, "optimizer": True, "iteration": True}
+
     def load(self, loaded_dict: dict, load_cfg: dict | None, strict: bool) -> bool:
         """Load specified models from a saved dict."""
-        # If no load_cfg is provided, determine what to load automatically
-        if load_cfg is None and any("actor_state_dict" in key for key in loaded_dict):  # Load from RL training
-            load_cfg = {"teacher": True, "iteration": False}  # Only load teacher by default
-        elif load_cfg is None:  # Load from distillation training
-            load_cfg = {
-                "student": True,
-                "teacher": True,
-                "optimizer": True,
-                "iteration": True,
-            }
+        if load_cfg is None:
+            if any("actor_state_dict" in key for key in loaded_dict):
+                load_cfg = {"teacher": True, "iteration": False}  # Load a previous RL checkpoint
+            else:
+                load_cfg = self.get_default_load_cfg()
 
         # Load the specified models
         if load_cfg.get("student"):

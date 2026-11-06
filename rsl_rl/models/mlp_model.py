@@ -37,6 +37,7 @@ class MLPModel(nn.Module):
         hidden_dims: tuple[int, ...] | list[int] = (256, 256, 256),
         activation: str = "elu",
         obs_normalization: bool = False,
+        network_cfg: dict | None = None,
         distribution_cfg: dict | None = None,
         extra_input_dim: int = 0,
         layer_norm: bool = False,
@@ -52,6 +53,9 @@ class MLPModel(nn.Module):
             hidden_dims: Hidden dimensions of the MLP.
             activation: Activation function of the MLP.
             obs_normalization: Whether to normalize the observations before feeding them to the MLP.
+            network_cfg: Configuration dictionary for an alternative network. ``None`` uses :class:`~rsl_rl.modules.MLP`
+                with `hidden_dims` and `activation`. Otherwise, the network is constructed from the input and output
+                dimensions and its own configuration arguments.
             distribution_cfg: Configuration dictionary for the output distribution. If provided, the model outputs
                 stochastic values sampled from the distribution.
             extra_input_dim: Width of an additional runtime input, such as a Q critic's action.
@@ -83,14 +87,20 @@ class MLPModel(nn.Module):
             mlp_output_dim = output_dim
 
         # MLP
-        if num_ensembles < 1:
-            raise ValueError("num_ensembles must be positive.")
-        args = (self._get_latent_dim(), mlp_output_dim, hidden_dims, activation)
-        self.mlp = (
-            MLP(*args, layer_norm=layer_norm)
-            if num_ensembles == 1
-            else EnsembleMLP(num_ensembles, *args, layer_norm=layer_norm)
-        )
+        if network_cfg is None:
+            if num_ensembles < 1:
+                raise ValueError("num_ensembles must be positive.")
+            args = (self._get_latent_dim(), mlp_output_dim, hidden_dims, activation)
+            self.mlp = (
+                MLP(*args, layer_norm=layer_norm)
+                if num_ensembles == 1
+                else EnsembleMLP(num_ensembles, *args, layer_norm=layer_norm)
+            )
+        else:
+            if num_ensembles != 1 or layer_norm:
+                raise ValueError("Configure custom network ensembles and normalization through network_cfg.")
+            network_class, network_cfg = resolve_class(network_cfg)
+            self.mlp = network_class(self._get_latent_dim(), mlp_output_dim, **network_cfg)
 
         # Initialize distribution-specific MLP weights
         if self.distribution is not None:
@@ -196,13 +206,13 @@ class MLPModel(nn.Module):
         """Return a version of the model compatible with Torch JIT export."""
         return _TorchMLPModel(self)
 
-    def as_onnx(self, verbose: bool) -> nn.Module:
+    def as_onnx(self) -> nn.Module:
         """Return a version of the model compatible with ONNX export."""
-        return _OnnxMLPModel(self, verbose)
+        return _OnnxMLPModel(self)
 
     def update_normalization(self, obs: TensorDict) -> None:
         """Update observation-normalization statistics from a batch of observations."""
-        if self.obs_normalization:
+        if self.obs_normalization and self.obs_groups:
             # Select and concatenate observations
             obs_list = [obs[obs_group] for obs_group in self.obs_groups]
             mlp_obs = torch.cat(obs_list, dim=-1)
@@ -224,6 +234,73 @@ class MLPModel(nn.Module):
     def _get_latent_dim(self) -> int:
         """Return the latent dimensionality consumed by the MLP head."""
         return self.obs_dim + self.extra_input_dim
+
+
+class QMLPModel(MLPModel):
+    """MLP-based state-action value model.
+
+    The model concatenates the (optionally normalized) observations with the actions and maps them to an output of
+    dimension ``output_dim``. This is a scalar Q-value for ``output_dim=1`` or, e.g., the logits of a categorical value
+    distribution.
+    """
+
+    def __init__(
+        self,
+        obs: TensorDict,
+        obs_groups: dict[str, list[str]],
+        obs_set: str,
+        output_dim: int,
+        action_dim: int,
+        hidden_dims: tuple[int, ...] | list[int] = (256, 256, 256),
+        activation: str = "elu",
+        obs_normalization: bool = False,
+        network_cfg: dict | None = None,
+        distribution_cfg: dict | None = None,
+    ) -> None:
+        """Initialize the Q model.
+
+        Args:
+            obs: Observation Dictionary.
+            obs_groups: Dictionary mapping observation sets to lists of observation groups.
+            obs_set: Observation set to use for this model (e.g., "critic").
+            output_dim: Dimension of the output.
+            action_dim: Dimension of the actions.
+            hidden_dims: Hidden dimensions of the MLP.
+            activation: Activation function.
+            obs_normalization: Whether to normalize the observations before feeding them to the MLP.
+            network_cfg: Configuration dictionary for an alternative network. ``None`` uses the default MLP.
+            distribution_cfg: Output distribution configuration. Only ``None`` is supported.
+        """
+        if distribution_cfg is not None:
+            raise ValueError("The QMLPModel does not support an output distribution.")
+        self.action_dim = action_dim
+        super().__init__(
+            obs,
+            obs_groups,
+            obs_set,
+            output_dim,
+            hidden_dims=hidden_dims,
+            activation=activation,
+            obs_normalization=obs_normalization,
+            network_cfg=network_cfg,
+        )
+
+    def forward(self, obs: TensorDict, actions: torch.Tensor) -> torch.Tensor:
+        """Forward pass of the state-action value model."""
+        latent = torch.cat([self.get_latent(obs), actions], dim=-1)
+        return self.mlp(latent)
+
+    def as_jit(self) -> torch.nn.Module:
+        """TorchScript export is not implemented for QMLPModel."""
+        raise NotImplementedError("QMLPModel does not support TorchScript export.")
+
+    def as_onnx(self) -> torch.nn.Module:
+        """ONNX export is not implemented for QMLPModel."""
+        raise NotImplementedError("QMLPModel does not support ONNX export.")
+
+    def _get_latent_dim(self) -> int:
+        """Return the combined observation and action dimension for the MLP head."""
+        return self.obs_dim + self.action_dim
 
 
 class _TorchMLPModel(nn.Module):
@@ -256,10 +333,9 @@ class _OnnxMLPModel(nn.Module):
 
     is_recurrent: bool = False
 
-    def __init__(self, model: MLPModel, verbose: bool) -> None:
+    def __init__(self, model: MLPModel) -> None:
         """Create an ONNX-export wrapper around an MLPModel."""
         super().__init__()
-        self.verbose = verbose
         self.obs_normalizer = copy.deepcopy(model.obs_normalizer)
         self.mlp = copy.deepcopy(model.mlp)
         if model.distribution is not None:

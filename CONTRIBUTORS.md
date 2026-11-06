@@ -36,12 +36,15 @@ Please keep the lists sorted alphabetically.
 * Jichuan Hu
 * Kohei Sendai
 * Lorenzo Terenzi
+* Louis Le Lay
 * Marko Bjelonic
 * Markus Portugall
 * Masahiro Kubota
 * Matthijs van der Boon
 * Özhan Özen
 * Pascal Roth
+* Rafael Cathomen
+* Sanghyun Yun
 * Shantian Zhou
 * Shaoshu Su
 * Shiqi Ren

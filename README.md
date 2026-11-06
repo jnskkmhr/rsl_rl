@@ -1,7 +1,17 @@
 # RSL-RL
 
-This checkout adds native FlashSAC as the internal fork build `5.5.1+flashsac.4`.
-See [FlashSAC usage and compatibility](docs/flash_sac.md); upstream PPO and distillation remain available.
+The `sac-pr-enhancement-compatible` branch merges `review/sac-pr-enhancement` into
+`jnskkmhr/supermimic` as fork build `5.5.2+supermimic.1`. It retains PPO,
+distillation, SuperMimic, FlashSAC and FastSAC, and adds the new native `SAC`.
+
+`OffPolicyRunner` selects the existing FlashSAC/FastSAC collection loop for those
+algorithms and the standard runner loop for native SAC. Existing model configs
+retain `extra_input_dim`, `layer_norm`, ensemble models and the legacy squashed
+Gaussian parameters. Native SAC uses separate Q models and its own replay buffer;
+changing an existing task to SAC requires an SAC algorithm/model configuration.
+Existing PPO and SuperMimic tasks do not change algorithms when upgrading.
+
+See [FlashSAC usage and compatibility](docs/flash_sac.md) for the legacy off-policy path.
 
 **RSL-RL** is a GPU-accelerated, lightweight learning library for robotics research. Its compact design allows
 researchers to prototype and test new ideas without the overhead of modifying large, complex libraries. RSL-RL can also
@@ -16,7 +26,7 @@ and features common algorithms for robot learning.
 ## Key Features
 
 - **Minimal, readable codebase** with clear extension points for rapid prototyping.
-- **Robotics-first methods** including PPO and Student-Teacher Distillation.
+- **Robotics-first methods** including PPO, SAC, and Student-Teacher Distillation.
 - **High-throughput training** with native Multi-GPU support.
 - **Proven performance** in numerous research publications.
 

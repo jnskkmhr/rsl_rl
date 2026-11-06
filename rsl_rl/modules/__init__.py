@@ -14,14 +14,12 @@ from .distribution import (
     HeteroscedasticGaussianDistribution,
     SquashedGaussianDistribution,
 )
-from .mlp import MLP
+from .mlp import MLP, ResidualMLP
 from .normalization import EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
 from .rnn import RNN, HiddenState
-
 from .world_model import WorldModel
 
 __all__ = [
-    "WorldModel",
     "CNN",
     "MLP",
     "RNN",
@@ -33,5 +31,7 @@ __all__ = [
     "GaussianDistribution",
     "HeteroscedasticGaussianDistribution",
     "HiddenState",
+    "ResidualMLP",
     "SquashedGaussianDistribution",
+    "WorldModel",
 ]
